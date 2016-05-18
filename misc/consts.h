@@ -43,30 +43,24 @@
 /* The minimum and maximum working conventional key size in bits.  In order 
    to avoid problems with space inside PKC-encrypted blocks when MIN_PKCSIZE 
    is less than 1024 bits, we limit the total keysize to 256 bits, which is 
-   adequate for all purposes - the limiting factor is AES-256.  
-   Unfortunately when loading a default-length key into a context we can't 
-   tell what the user is going to do with the generated key (for example 
-   whether they'll export it using a very short public key) so we have to 
-   take the approach of using a practical working key length that will work 
-   even with a short public key.  This means that for Blowfish, RC2, RC4, 
-   and RC5 the working keylength is shorter than strictly necessary 
-   (actually for RC2 we have to limit the keysize to 128 bits for CMS/SMIME 
-   compatibility) */
+   adequate for all purposes - the limiting factor is AES-256 */
 
 #define MIN_KEYSIZE				bitsToBytes( 64 )
 #define MAX_WORKING_KEYSIZE		bitsToBytes( 256 )
 
 /* The minimum public key size (c.f. CRYPT_MAX_PKCSIZE).  This is a bit less 
    than the actual size because keygen specifics can lead to keys that are 
-   slightly shorter than the nominal size.  In addition we have to have a 
-   special value for ECC keys, for which key sizes work differently that
-   conventional PKCs */
+   slightly shorter than the nominal size, and signatures and wrapped keys
+   can also be shorter (1/256 will be one byte shorter, 1/64K will be two
+   bytes shorter, and so on).  In addition we have to have a special value 
+   for ECC keys, for which key sizes work differently that conventional 
+   PKCs */
 
-#define MIN_PKCSIZE				( bitsToBytes( 1024 ) - 1 )
-#define MIN_PKCSIZE_ECC			( bitsToBytes( 192 ) - 1 )
+#define MIN_PKCSIZE				( bitsToBytes( 1024 ) - 2 )
+#define MIN_PKCSIZE_ECC			( bitsToBytes( 256 ) - 2 )
 
 /* When we read a public key, a value that's too short to be even vaguely
-   sensible is reported as CRYPT_ERROR_BADDATA, but it's it's at least 
+   sensible is reported as CRYPT_ERROR_BADDATA, but if it's at least 
    vaguely sensible but too short to be secure it's reported as 
    CRYPT_ERROR_NOSECURE.  The following value defines the cutoff point 
    between "obviously invalid" and "theoretically valid but not secure",
@@ -128,37 +122,47 @@
 
 #define MAX_ATTRIBUTE_SIZE		1024
 
-/* Some objects contain internal buffers used to process data whose size can
-   be specified by the user, the following is the minimum size allowed for
-   these buffers */
+/* Some objects contain internal buffers used to process data whose size can 
+   be specified by the user, the following is the minimum and maximum size 
+   allowed for these buffers.  We don't use MAX_INTLENGTH for this both 
+   because it's a peculiarly high value (using all addressable memory as a 
+   buffer is a bit odd) and because using a fraction of the full INT_MAX
+   range makes it safe to perform range-based comparisons, 'value1 + 
+   value2 < value3', without the risk of integer overflow */
 
 #define MIN_BUFFER_SIZE			8192
+#define MAX_BUFFER_SIZE			( INT_MAX / 4 )
 
-/* The minimum allowed length for object names (keysets, devices, users,
-   etc).  In theory this could be a single character, but by default we
-   make it 2 chars to make things more resistant to off-by-one errors in
-   lengths, particularly since it applies to external objects outside
-   cryptlib's control */
+/* The minimum allowed length for (typically human-readable) object names 
+   (keysets, devices, users, etc).  In theory this could be a single 
+   character, but by default we make it 2 chars to make things more 
+   resistant to off-by-one errors in lengths, particularly since it applies 
+   to external objects outside cryptlib's control.  Alongside this we also 
+   define a minimum length for generic binary IDs */
 
 #ifdef UNICODE_CHARS
   #define MIN_NAME_LENGTH		( 2 * sizeof( wchar_t ) )
 #else
   #define MIN_NAME_LENGTH		2
 #endif /* Unicode vs. ASCII environments */
+#define MIN_ID_LENGTH			2
 
 /* The minimum time value that's regarded as being a valid time (we have to 
    allow dates slightly before the current time because of things like 
    backdated cert revocations, as a rule of thumb we allow a date up to two
    years in the past), an approximation of the current time (with the 
-   constraint that it's not after the current date), and a somewhat more
-   relaxed minimum time value used when reading stored data like private 
-   keys, which can contain associated certificates that have been hanging 
-   around for years.  This can't safely be set to after about 1995 because
-   there are mid-90s CA root certificates that are still in use today */
+   constraint that it's not after the current date, unfortunately we can't
+   use any preprocessor macros for this since __DATE__ and __TIME__ are text
+   strings rather than timestamps), and a somewhat more relaxed minimum time 
+   value used when reading stored data like private keys, which can contain 
+   associated certificates that have been hanging around for years.  This 
+   can't safely be set to after about 1995 because there are mid-90s CA root 
+   certificates that are still in use today */
 
-#define MIN_TIME_VALUE			( ( 2010 - 1970 ) * 365 * 86400L )
-#define CURRENT_TIME_VALUE		( ( 2012 - 1970 ) * 365 * 86400L )
-#define MIN_STORED_TIME_VALUE	( ( 1995 - 1970 ) * 365 * 86400L )
+#define YEARS_TO_SECONDS( years ) ( ( years ) * 365 * 86400L )
+#define CURRENT_TIME_VALUE		( YEARS_TO_SECONDS( 2016 - 1970 ) )
+#define MIN_TIME_VALUE			( CURRENT_TIME_VALUE - YEARS_TO_SECONDS( 2 ) )
+#define MIN_STORED_TIME_VALUE	( YEARS_TO_SECONDS( 1995 - 1970 ) )
 
 /* The minimum and maximum network port numbers.  Note that we allow ports 
    down to 21 (= FTP) rather than the more obvious 22 (= SSH) provided by 
@@ -181,7 +185,7 @@
    such as a hashed password.  This is used to prevent DoS attacks from data
    containing excessive iteration counts */
 
-#define MAX_KEYSETUP_ITERATIONS	20000
+#define MAX_KEYSETUP_ITERATIONS	min( INT_MAX, 50000L )
 
 /* PGP's S2K uses a bizarre processing-complexity specifier that specifies,
    in a very roundabout manner, the number of bytes hashed rather than the 
@@ -203,7 +207,7 @@
    the upper limit we hardcode in the smallest value that'll still allow us 
    to read these keyrings */
 
-#define MAX_KEYSETUP_HASHSPECIFIER	( 3407872 / 64 )
+#define MAX_KEYSETUP_HASHSPECIFIER	min( INT_MAX, ( 3407872L / 64 ) )
 
 /* The maximum certificate compliance level */
 
@@ -254,11 +258,7 @@
 #define FAILSAFE_ITERATIONS_SMALL	10
 #define FAILSAFE_ITERATIONS_MED		50
 #define FAILSAFE_ITERATIONS_LARGE	1000
-#ifdef SYSTEM_16BIT
-  #define FAILSAFE_ITERATIONS_MAX	10000
-#else
-  #define FAILSAFE_ITERATIONS_MAX	100000
-#endif /* 16-bit vs 32/64-bit systems */
+#define FAILSAFE_ITERATIONS_MAX		min( INT_MAX, 100000L )
 
 /* Pseudo-constants used for array bounds-checking.  These provide a more
    precise limit than the FAILSAFE_ITERATIONS_xxx values above.  We subtract
@@ -279,13 +279,41 @@
 #define MAX_URL_SIZE			MAX_DNS_SIZE
 
 /* The HMAC input and output padding values.  These are defined here rather
-   than in context.h because they're needed by some routines that perform
-   HMAC operations using raw SHA-1 contexts, since some devices provide SHA-1
-   but not HMAC-SHA1 so we have to build it ourselves where it's needed for
-   things like key hashing */
+   than in context.h because they're needed by some PRF mechanisms that 
+   synthesise HMAC operations from low-level hash operations */
 
 #define HMAC_IPAD				0x36
 #define HMAC_OPAD				0x5C
+
+/* Padding in order to defeat traffic analysis is extremely problematic.  
+   The simplistic approach of adding random padding provides little more 
+   than warm fuzzies since it falls almost trivially to statistical 
+   classifiers like Bayesian or support vector machines.  In fact almost any 
+   attempt to defeat traffic analysis with low overhead, including random 
+   padding, linear padding (padding to the nearest 128 bytes), exponential 
+   padding (padding to the nearest power of two), mice/elephant padding 
+   (padding short packets to 128 bytes and long ones to the MTU), straight 
+   padding to the MTU, and padding by a random multiple of 8 or 16 bytes, 
+   doesn't work (see "Peek-a-Book, I Still See You: Why Efficient Traffic 
+   Analysis Countermeasures Fail" by Dyer, Coult, Ristenpart and Shrimpton).
+
+   It's only when quite complex traffic morphing, sending fixed-length 
+   packets at fixed intervals and the like, is applied and reaches an 
+   overhead of 400% that things start getting tricky for an attacker, or at 
+   least an attacker using a straightforward Bayesian or SVM classifier.
+
+   This doesn't leave much choice in the way of padding, since no matter 
+   what we do it won't be terribly effective.  The best option is to choose 
+   the variant with the lowest overhead and use that, since it has at least 
+   a small amount of effect.  This is linear padding, but we pad to 32 bytes 
+   instead of 128 because we're typically used in embedded environments 
+   which both use shorter messages and often have bandwidth constraints.
+   
+   Note that this value can't be set to more than 256 bytes (or in some 
+   cases 255 due to one byte being needed for the length) because most
+   padding schemes only allow a single-byte pad length value */
+
+#define MESSAGE_PADDING_SIZE	32
 
 /* Generic error return code/invalid value code */
 
@@ -299,9 +327,9 @@
    around this we perform a dummy initialisation of the variable with a 
    symbolic value to get rid of the false positive */
 
-#define DUMMY_INIT				0
-#define DUMMY_INIT_PTR			NULL
-#define DUMMY_INIT_STRUCT		{ 0 }
+#define DUMMY_INIT				= 0
+#define DUMMY_INIT_PTR			= NULL
+#define DUMMY_INIT_STRUCT		= { 0 }
 
 /* A special return code to indicate that everything went OK but there's
    some special action to perform.  This is generally used when a lower-level
@@ -311,7 +339,7 @@
    more work to do on a later call.  The parentheses are to catch potential
    erroneous use in an expression */
 
-#define OK_SPECIAL				( -4321 )
+#define OK_SPECIAL				( -123 )
 
 /* When parameters get passed in messages, their mapping to parameters passed
    to the calling function gets lost.  The following error codes are used to
@@ -323,26 +351,32 @@
    we have the following possible error codes.  The parentheses are to catch
    potential erroneous use in an expression */
 
-#define CRYPT_ARGERROR_OBJECT	( -1000 )	/* Error in object being sent msg.*/
-#define CRYPT_ARGERROR_VALUE	( -1001 )	/* Error in message value */
-#define CRYPT_ARGERROR_STR1		( -1002 )	/* Error in first string arg */
-#define CRYPT_ARGERROR_STR2		( -1003 )	/* Error in second string arg */
-#define CRYPT_ARGERROR_NUM1		( -1004 )	/* Error in first numeric arg */
-#define CRYPT_ARGERROR_NUM2		( -1005 )	/* Error in second numeric arg */
+#define CRYPT_ARGERROR_OBJECT	( -100 )	/* Error in object being sent msg.*/
+#define CRYPT_ARGERROR_VALUE	( -101 )	/* Error in message value */
+#define CRYPT_ARGERROR_STR1		( -102 )	/* Error in first string arg */
+#define CRYPT_ARGERROR_STR2		( -103 )	/* Error in second string arg */
+#define CRYPT_ARGERROR_NUM1		( -104 )	/* Error in first numeric arg */
+#define CRYPT_ARGERROR_NUM2		( -105 )	/* Error in second numeric arg */
 
 #define cryptArgError( status )	\
 		( ( status ) >= CRYPT_ARGERROR_NUM2 && ( status ) <= CRYPT_ARGERROR_OBJECT )
 #define cryptStandardError( status ) \
 		( ( status ) >= CRYPT_ENVELOPE_RESOURCE && ( status ) <= CRYPT_OK )
 
+/* Network I/O is government by all sorts of timeouts.  The following are 
+   the default timeout values used for network I/O, unless overridden by the
+   user */
+
+#define	NET_TIMEOUT_CONNECT		30
+#define NET_TIMEOUT_READ		15
+#define NET_TIMEOUT_WRITE		5
+
 /* The data formats for reading/writing public keys */
 
 typedef enum {
 	KEYFORMAT_NONE,		/* No key format */
 	KEYFORMAT_CERT,		/* X.509 SubjectPublicKeyInfo */
-/*	KEYFORMAT_PUBLIC,	// PKCS #15 public key - currently unused */
 	KEYFORMAT_SSH,		/* SSHv2 public key */
-	KEYFORMAT_SSH1,		/* SSHv1 public key */
 	KEYFORMAT_SSL,		/* SSL public key */
 	KEYFORMAT_PGP,		/* PGP public key */
 	KEYFORMAT_PRIVATE,	/* Private key */

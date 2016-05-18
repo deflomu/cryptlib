@@ -55,10 +55,13 @@
 *																			*
 ****************************************************************************/
 
-/* Sanity-check the stream state */
+/* Sanity-check the stream state.  The first function is given a non-
+   canonical name because the function pointer used to refer to the family of
+   functions is also called 'sanityCheckFunction' so using a different name 
+   avoids confusion between the two */
 
 CHECK_RETVAL_BOOL STDC_NONNULL_ARG( ( 1 ) ) \
-static BOOLEAN sanityCheckFunction( const STREAM *stream )
+static BOOLEAN sanityCheckFn( const STREAM *stream )
 	{
 	NET_STREAM_INFO *netStream = ( NET_STREAM_INFO * ) stream->netStreamInfo;
 
@@ -117,14 +120,14 @@ static BOOLEAN sanityCheckBufferedFunction( const STREAM *stream )
 			 bufPos			 bufEnd */
 	if( stream->bufPos < 0 || stream->bufPos > stream->bufEnd || \
 		stream->bufEnd < 0 || stream->bufEnd > stream->bufSize || \
-		stream->bufSize <= 0 || stream->bufSize >= MAX_INTLENGTH )
+		stream->bufSize <= 0 || stream->bufSize >= MAX_BUFFER_SIZE )
 		return( FALSE );
 
 	/* Network streams have a second buffer used for writes, make sure that 
 	   the write buffer position is within bounds */
 	if( netStream->writeBuffer == NULL || \
 		netStream->writeBufSize <= 0 || \
-		netStream->writeBufSize >= MAX_INTLENGTH )
+		netStream->writeBufSize >= MAX_BUFFER_SIZE )
 		return( FALSE );
 	if( netStream->writeBufEnd < 0 || \
 		netStream->writeBufEnd > netStream->writeBufSize )
@@ -147,10 +150,14 @@ CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2, 4 ) ) \
 static int transportDirectReadFunction( INOUT STREAM *stream, 
 										OUT_BUFFER( maxLength, *length ) \
 											void *buffer, 
-										IN_LENGTH const int maxLength, 
-										OUT_LENGTH_Z int *length )
+										IN_DATALENGTH const int maxLength, 
+										OUT_DATALENGTH_Z int *length )
 	{
 	NET_STREAM_INFO *netStream = ( NET_STREAM_INFO * ) stream->netStreamInfo;
+	const STM_SANITYCHECK_FUNCTION sanityCheckFunction = \
+							FNPTR_GET( netStream->sanityCheckFunction );
+	const STM_TRANSPORTREAD_FUNCTION transportReadFunction = \
+							FNPTR_GET( netStream->transportReadFunction );
 
 	assert( isWritePtr( stream, sizeof( STREAM ) ) );
 	assert( isWritePtr( buffer, maxLength ) );
@@ -158,21 +165,26 @@ static int transportDirectReadFunction( INOUT STREAM *stream,
 	assert( isWritePtr( netStream, sizeof( NET_STREAM_INFO ) ) );
 
 	REQUIRES_S( netStream != NULL );
-	REQUIRES_S( netStream->sanityCheckFunction( stream ) );
-	REQUIRES_S( maxLength > 0 && maxLength < MAX_INTLENGTH );
+	REQUIRES_S( sanityCheckFunction != NULL );
+	REQUIRES_S( sanityCheckFunction( stream ) );
+	REQUIRES_S( maxLength > 0 && maxLength < MAX_BUFFER_SIZE );
+	REQUIRES_S( transportReadFunction != NULL );
 
-	return( netStream->transportReadFunction( stream, buffer, maxLength, 
-											  length,
-											  TRANSPORT_FLAG_NONE ) );
+	return( transportReadFunction( stream, buffer, maxLength, length,
+								   TRANSPORT_FLAG_NONE ) );
 	}
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2, 4 ) ) \
 static int transportDirectWriteFunction( INOUT STREAM *stream, 
 										 IN_BUFFER( maxLength ) const void *buffer, 
-										 IN_LENGTH const int maxLength,
-										 OUT_LENGTH_Z int *length )
+										 IN_DATALENGTH const int maxLength,
+										 OUT_DATALENGTH_Z int *length )
 	{
 	NET_STREAM_INFO *netStream = ( NET_STREAM_INFO * ) stream->netStreamInfo;
+	const STM_SANITYCHECK_FUNCTION sanityCheckFunction = \
+							FNPTR_GET( netStream->sanityCheckFunction );
+	const STM_TRANSPORTWRITE_FUNCTION transportWriteFunction = \
+							FNPTR_GET( netStream->transportWriteFunction );
 
 	assert( isWritePtr( stream, sizeof( STREAM ) ) );
 	assert( isReadPtr( buffer, maxLength ) );
@@ -180,12 +192,13 @@ static int transportDirectWriteFunction( INOUT STREAM *stream,
 	assert( isWritePtr( netStream, sizeof( NET_STREAM_INFO ) ) );
 
 	REQUIRES_S( netStream != NULL );
-	REQUIRES_S( netStream->sanityCheckFunction( stream ) );
-	REQUIRES_S( maxLength > 0 && maxLength < MAX_INTLENGTH );
+	REQUIRES_S( sanityCheckFunction != NULL );
+	REQUIRES_S( sanityCheckFunction( stream ) );
+	REQUIRES_S( maxLength > 0 && maxLength < MAX_BUFFER_SIZE );
+	REQUIRES_S( transportWriteFunction != NULL );
 
-	return( netStream->transportWriteFunction( stream, buffer, maxLength, 
-											   length,
-											   TRANSPORT_FLAG_NONE ) );
+	return( transportWriteFunction( stream, buffer, maxLength, length,
+									TRANSPORT_FLAG_NONE ) );
 	}
 
 STDC_NONNULL_ARG( ( 1 ) ) \
@@ -193,8 +206,8 @@ void setStreamLayerDirect( INOUT NET_STREAM_INFO *netStream )
 	{
 	assert( isWritePtr( netStream, sizeof( NET_STREAM_INFO ) ) );
 
-	netStream->writeFunction = transportDirectWriteFunction;
-	netStream->readFunction = transportDirectReadFunction;
+	FNPTR_SET( netStream->writeFunction, transportDirectWriteFunction );
+	FNPTR_SET( netStream->readFunction, transportDirectReadFunction );
 	}
 
 /****************************************************************************
@@ -220,13 +233,16 @@ static int transportSessionConnectFunction( INOUT STREAM *stream,
 											STDC_UNUSED const int port )
 	{
 	NET_STREAM_INFO *netStream = ( NET_STREAM_INFO * ) stream->netStreamInfo;
+	const STM_SANITYCHECK_FUNCTION sanityCheckFunction = \
+							FNPTR_GET( netStream->sanityCheckFunction );
 	int isActive, status;
 
 	assert( isWritePtr( stream, sizeof( STREAM ) ) );
 	assert( isWritePtr( netStream, sizeof( NET_STREAM_INFO ) ) );
 	
 	REQUIRES_S( netStream != NULL );
-	REQUIRES_S( netStream->sanityCheckFunction( stream ) );
+	REQUIRES_S( sanityCheckFunction != NULL );
+	REQUIRES_S( sanityCheckFunction( stream ) );
 	REQUIRES_S( host == NULL && hostLen == 0 );
 	REQUIRES_S( port == 0 );
 
@@ -252,12 +268,15 @@ static void transportSessionDisconnectFunction( INOUT STREAM *stream,
 												const BOOLEAN fullDisconnect )
 	{
 	NET_STREAM_INFO *netStream = ( NET_STREAM_INFO * ) stream->netStreamInfo;
+	const STM_SANITYCHECK_FUNCTION sanityCheckFunction = \
+							FNPTR_GET( netStream->sanityCheckFunction );
 
 	assert( isWritePtr( stream, sizeof( STREAM ) ) );
 	assert( isWritePtr( netStream, sizeof( NET_STREAM_INFO ) ) );
 
 	REQUIRES_V( netStream != NULL );
-	REQUIRES_V( netStream->sanityCheckFunction( stream ) );
+	REQUIRES_V( sanityCheckFunction != NULL );
+	REQUIRES_V( sanityCheckFunction( stream ) );
 
 	krnlSendNotifier( netStream->iTransportSession, IMESSAGE_DECREFCOUNT );
 	}
@@ -272,11 +291,13 @@ CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2, 4 ) ) \
 static int transportSessionReadFunction( INOUT STREAM *stream, 
 										 OUT_BUFFER( maxLength, *length ) \
 											BYTE *buffer, 
-										 IN_LENGTH const int maxLength, 
-										 OUT_LENGTH_Z int *length, 
+										 IN_DATALENGTH const int maxLength, 
+										 OUT_DATALENGTH_Z int *length, 
 										 IN_FLAGS_Z( TRANSPORT ) const int flags )
 	{
 	NET_STREAM_INFO *netStream = ( NET_STREAM_INFO * ) stream->netStreamInfo;
+	const STM_SANITYCHECK_FUNCTION sanityCheckFunction = \
+							FNPTR_GET( netStream->sanityCheckFunction );
 	MESSAGE_DATA msgData;
 	int newTimeout = CRYPT_UNUSED, status;
 
@@ -286,8 +307,9 @@ static int transportSessionReadFunction( INOUT STREAM *stream,
 	assert( isWritePtr( netStream, sizeof( NET_STREAM_INFO ) ) );
 
 	REQUIRES_S( netStream != NULL );
-	REQUIRES_S( stream->sanityCheckFunction( stream ) );
-	REQUIRES_S( maxLength > 0 && maxLength < MAX_INTLENGTH );
+	REQUIRES_S( sanityCheckFunction != NULL );
+	REQUIRES_S( sanityCheckFunction( stream ) );
+	REQUIRES_S( maxLength > 0 && maxLength < MAX_BUFFER_SIZE );
 	REQUIRES_S( flags >= TRANSPORT_FLAG_NONE && \
 				flags <= TRANSPORT_FLAG_MAX );
 
@@ -304,16 +326,20 @@ static int transportSessionReadFunction( INOUT STREAM *stream,
 			newTimeout = 30;
 		}
 	if( newTimeout != CRYPT_UNUSED )
+		{
 		( void ) krnlSendMessage( netStream->iTransportSession, 
 								  IMESSAGE_SETATTRIBUTE, &newTimeout, 
 								  CRYPT_OPTION_NET_READTIMEOUT );
+		}
 	setMessageData( &msgData, buffer, maxLength );
 	status = krnlSendMessage( netStream->iTransportSession, 
 							  IMESSAGE_ENV_POPDATA, &msgData, 0 );
 	if( newTimeout != CRYPT_UNUSED )
+		{
 		( void ) krnlSendMessage( netStream->iTransportSession, 
 								  IMESSAGE_SETATTRIBUTE, &stream->timeout, 
 								  CRYPT_OPTION_NET_READTIMEOUT );
+		}
 	if( cryptStatusError( status ) )
 		return( getSessionErrorInfo( stream, status ) );
 	if( msgData.length < maxLength )
@@ -331,12 +357,14 @@ static int transportSessionReadFunction( INOUT STREAM *stream,
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2, 4 ) ) \
 static int transportSessionWriteFunction( INOUT STREAM *stream, 
 										  IN_BUFFER( length ) const BYTE *buffer, 
-										  IN_LENGTH const int maxLength, 
-										  OUT_LENGTH_Z int *length,
+										  IN_DATALENGTH const int maxLength, 
+										  OUT_DATALENGTH_Z int *length,
 										  IN_FLAGS_Z( TRANSPORT ) \
 											const int flags )
 	{
 	NET_STREAM_INFO *netStream = ( NET_STREAM_INFO * ) stream->netStreamInfo;
+	const STM_SANITYCHECK_FUNCTION sanityCheckFunction = \
+							FNPTR_GET( netStream->sanityCheckFunction );
 	MESSAGE_DATA msgData;
 	int status;
 
@@ -345,8 +373,9 @@ static int transportSessionWriteFunction( INOUT STREAM *stream,
 	assert( isWritePtr( netStream, sizeof( NET_STREAM_INFO ) ) );
 
 	REQUIRES_S( netStream != NULL );
-	REQUIRES_S( netStream->sanityCheckFunction( stream ) );
-	REQUIRES_S( maxLength > 0 && maxLength < MAX_INTLENGTH );
+	REQUIRES_S( sanityCheckFunction != NULL );
+	REQUIRES_S( sanityCheckFunction( stream ) );
+	REQUIRES_S( maxLength > 0 && maxLength < MAX_BUFFER_SIZE );
 	REQUIRES_S( flags >= TRANSPORT_FLAG_NONE && \
 				flags <= TRANSPORT_FLAG_MAX );
 
@@ -422,12 +451,16 @@ CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2, 4 ) ) \
 static int bufferedTransportReadFunction( INOUT STREAM *stream, 
 										  OUT_BUFFER( maxLength, *length ) \
 											BYTE *buffer, 
-										  IN_LENGTH const int maxLength, 
-										  OUT_LENGTH_Z int *length, 
+										  IN_DATALENGTH const int maxLength, 
+										  OUT_DATALENGTH_Z int *length, 
 										  IN_FLAGS_Z( TRANSPORT ) \
 											const int flags )
 	{
 	NET_STREAM_INFO *netStream = ( NET_STREAM_INFO * ) stream->netStreamInfo;
+	const STM_SANITYCHECK_FUNCTION sanityCheckFunction = \
+							FNPTR_GET( netStream->sanityCheckFunction );
+	const STM_TRANSPORTREAD_FUNCTION transportReadFunction = \
+							FNPTR_GET( netStream->transportReadFunction );
 	const int bytesLeft = stream->bufEnd - stream->bufPos;
 	int bufferBytesRead, bytesRead, status;
 
@@ -437,11 +470,13 @@ static int bufferedTransportReadFunction( INOUT STREAM *stream,
 	assert( isWritePtr( netStream, sizeof( NET_STREAM_INFO ) ) );
 
 	REQUIRES_S( netStream != NULL );
-	REQUIRES_S( netStream->sanityCheckFunction( stream ) );
-	REQUIRES_S( maxLength > 0 && maxLength < MAX_INTLENGTH );
+	REQUIRES_S( sanityCheckFunction != NULL );
+	REQUIRES_S( sanityCheckFunction( stream ) );
+	REQUIRES_S( maxLength > 0 && maxLength < MAX_BUFFER_SIZE );
 	REQUIRES_S( bytesLeft >= 0 && bytesLeft < MAX_INTLENGTH_SHORT );
 	REQUIRES_S( flags >= TRANSPORT_FLAG_NONE && \
 				flags <= TRANSPORT_FLAG_MAX );
+	REQUIRES_S( transportReadFunction != NULL );
 
 	/* Clear return value */
 	*length = 0;
@@ -462,7 +497,7 @@ static int bufferedTransportReadFunction( INOUT STREAM *stream,
 			}
 		*length = maxLength;
 
-		ENSURES_S( netStream->sanityCheckFunction( stream ) );
+		ENSURES_S( sanityCheckFunction( stream ) );
 
 		return( CRYPT_OK );
 		}
@@ -503,8 +538,7 @@ static int bufferedTransportReadFunction( INOUT STREAM *stream,
 		   asked for.  Since there may be data already present from an
 		   earlier speculative read we only read as much as we actually need 
 		   in order to fulfill the request */
-		status = netStream->transportReadFunction( stream,
-										stream->buffer + stream->bufEnd, 
+		status = transportReadFunction( stream, stream->buffer + stream->bufEnd, 
 										bytesToRead, &bytesRead, 
 										TRANSPORT_FLAG_BLOCKING );
 		if( cryptStatusError( status ) )
@@ -516,7 +550,7 @@ static int bufferedTransportReadFunction( INOUT STREAM *stream,
 		   isn't fatal since this was only a speculative read  */
 		if( stream->bufEnd < stream->bufSize )
 			{
-			status = netStream->transportReadFunction( stream,
+			status = transportReadFunction( stream, 
 										stream->buffer + stream->bufEnd,
 										stream->bufSize - stream->bufEnd,
 										&bytesRead, TRANSPORT_FLAG_NONBLOCKING );
@@ -524,7 +558,7 @@ static int bufferedTransportReadFunction( INOUT STREAM *stream,
 				stream->bufEnd += bytesRead;
 			}
 		}
-	ENSURES_S( netStream->sanityCheckFunction( stream ) );
+	ENSURES_S( sanityCheckFunction( stream ) );
 
 	/* Read as much as we can from the buffer */
 	bufferBytesRead = min( maxLength, stream->bufEnd );
@@ -535,7 +569,7 @@ static int bufferedTransportReadFunction( INOUT STREAM *stream,
 	/* If we could satisfy the entire read from the buffer, we're done */
 	if( maxLength <= bufferBytesRead )	/* Actually length == bufferBytesRead */
 		{
-		ENSURES_S( netStream->sanityCheckFunction( stream ) );
+		ENSURES_S( sanityCheckFunction( stream ) );
 
 		return( CRYPT_OK );
 		}
@@ -547,14 +581,14 @@ static int bufferedTransportReadFunction( INOUT STREAM *stream,
 	   when we try and replenish the buffer from the network.  For now we 
 	   simply force the operation to be atomic since we're reading PKI 
 	   datagrams that have to be read in their entirety */
-	status = netStream->transportReadFunction( stream,
-					buffer + bufferBytesRead, maxLength - bufferBytesRead,
-					&bytesRead, TRANSPORT_FLAG_BLOCKING );
+	status = transportReadFunction( stream, buffer + bufferBytesRead, 
+									maxLength - bufferBytesRead, &bytesRead, 
+									TRANSPORT_FLAG_BLOCKING );
 	if( cryptStatusError( status ) )
 		return( status );
 	*length += bytesRead;
 
-	ENSURES_S( netStream->sanityCheckFunction( stream ) );
+	ENSURES_S( sanityCheckFunction( stream ) );
 
 	return( CRYPT_OK );
 	}
@@ -611,17 +645,17 @@ static int bufferedTransportReadFunction( INOUT STREAM *stream,
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 4 ) ) \
 static int processIncompleteWrite( INOUT NET_STREAM_INFO *netStream, 
-								   IN_LENGTH const int bytesWritten,
-								   IN_LENGTH_Z const int newDataToWrite,
-								   OUT_LENGTH_Z int *newDataWritten )
+								   IN_DATALENGTH const int bytesWritten,
+								   IN_DATALENGTH_Z const int newDataToWrite,
+								   OUT_DATALENGTH_Z int *newDataWritten )
 	{
 	const int bytesLeftToWrite = netStream->writeBufEnd - bytesWritten;
 
 	assert( isWritePtr( netStream, sizeof( NET_STREAM_INFO ) ) );
 
 	REQUIRES( bytesWritten > 0 && bytesWritten < netStream->writeBufEnd && \
-			  bytesWritten < MAX_INTLENGTH );
-	REQUIRES( newDataToWrite >= 0 && newDataToWrite < MAX_INTLENGTH );
+			  bytesWritten < MAX_BUFFER_SIZE );
+	REQUIRES( newDataToWrite >= 0 && newDataToWrite < MAX_BUFFER_SIZE );
 			  /* May be zero if the write buffer was already full */
 
 	/* Clear return value */
@@ -663,12 +697,16 @@ static int processIncompleteWrite( INOUT NET_STREAM_INFO *netStream,
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2, 4 ) ) \
 static int bufferedTransportWriteFunction( INOUT STREAM *stream, 
 										   IN_BUFFER( maxLength ) const BYTE *buffer, 
-										   IN_LENGTH const int maxLength, 
-										   OUT_LENGTH_Z int *length, 
+										   IN_DATALENGTH const int maxLength, 
+										   OUT_DATALENGTH_Z int *length, 
 										   IN_FLAGS_Z( TRANSPORT ) \
 											const int flags )
 	{
 	NET_STREAM_INFO *netStream = ( NET_STREAM_INFO * ) stream->netStreamInfo;
+	const STM_SANITYCHECK_FUNCTION sanityCheckFunction = \
+							FNPTR_GET( netStream->sanityCheckFunction );
+	const STM_TRANSPORTWRITE_FUNCTION transportWriteFunction = \
+							FNPTR_GET( netStream->transportWriteFunction );
 	const BYTE *bufPtr = buffer;
 	int byteCount = maxLength, bytesWritten, status;
 
@@ -677,10 +715,12 @@ static int bufferedTransportWriteFunction( INOUT STREAM *stream,
 	assert( isWritePtr( netStream, sizeof( NET_STREAM_INFO ) ) );
 
 	REQUIRES_S( netStream != NULL );
-	REQUIRES_S( netStream->sanityCheckFunction( stream ) );
-	REQUIRES_S( maxLength > 0 && maxLength < MAX_INTLENGTH );
+	REQUIRES_S( sanityCheckFunction != NULL );
+	REQUIRES_S( sanityCheckFunction( stream ) );
+	REQUIRES_S( maxLength > 0 && maxLength < MAX_BUFFER_SIZE );
 	REQUIRES_S( flags >= TRANSPORT_FLAG_NONE && \
 				flags <= TRANSPORT_FLAG_MAX );
+	REQUIRES_S( transportWriteFunction != NULL );
 
 	/* Clear return value */
 	*length = 0;
@@ -695,7 +735,7 @@ static int bufferedTransportWriteFunction( INOUT STREAM *stream,
 		netStream->writeBufEnd += byteCount;
 		*length = byteCount;
 
-		ENSURES_S( netStream->sanityCheckFunction( stream ) );
+		ENSURES_S( sanityCheckFunction( stream ) );
 
 		return( CRYPT_OK );
 		}
@@ -717,9 +757,9 @@ static int bufferedTransportWriteFunction( INOUT STREAM *stream,
 					bytesToCopy );
 			netStream->writeBufEnd += bytesToCopy;
 			}
-		status = netStream->transportWriteFunction( stream, 
-							netStream->writeBuffer, netStream->writeBufEnd, 
-							&bytesWritten, TRANSPORT_FLAG_NONE );
+		status = transportWriteFunction( stream, netStream->writeBuffer, 
+							netStream->writeBufEnd, &bytesWritten, 
+							TRANSPORT_FLAG_NONE );
 		if( cryptStatusError( status ) )
 			return( status );
 		if( bytesWritten < netStream->writeBufEnd )
@@ -729,7 +769,7 @@ static int bufferedTransportWriteFunction( INOUT STREAM *stream,
 			if( cryptStatusError( status ) )
 				return( status );
 
-			ENSURES_S( netStream->sanityCheckFunction( stream ) );
+			ENSURES_S( sanityCheckFunction( stream ) );
 
 			return( CRYPT_OK );
 			}
@@ -743,7 +783,7 @@ static int bufferedTransportWriteFunction( INOUT STREAM *stream,
 				/* We've written everything, exit */
 				*length = maxLength;
 
-				ENSURES_S( netStream->sanityCheckFunction( stream ) );
+				ENSURES_S( sanityCheckFunction( stream ) );
 
 				return( CRYPT_OK );
 				}
@@ -752,9 +792,8 @@ static int bufferedTransportWriteFunction( INOUT STREAM *stream,
 	ENSURES( netStream->writeBufEnd == 0 );
 
 	/* Write anything that's left directly */
-	status = netStream->transportWriteFunction( stream, bufPtr, byteCount, 
-												&bytesWritten, 
-												TRANSPORT_FLAG_NONE );
+	status = transportWriteFunction( stream, bufPtr, byteCount, 
+									 &bytesWritten, TRANSPORT_FLAG_NONE );
 	if( cryptStatusError( status ) )
 		return( status );
 	if( bytesWritten < byteCount )
@@ -773,7 +812,7 @@ static int bufferedTransportWriteFunction( INOUT STREAM *stream,
 		*length = maxLength;
 		}
 
-	ENSURES_S( netStream->sanityCheckFunction( stream ) );
+	ENSURES_S( sanityCheckFunction( stream ) );
 
 	return( CRYPT_OK );
 	}
@@ -786,15 +825,20 @@ void setStreamLayerBuffering( INOUT NET_STREAM_INFO *netStream,
 
 	if( useTransportBuffering )
 		{
-		netStream->sanityCheckFunction = sanityCheckBufferedFunction;
-		netStream->bufferedTransportReadFunction = bufferedTransportReadFunction;
-		netStream->bufferedTransportWriteFunction = bufferedTransportWriteFunction;
+		FNPTR_SET( netStream->sanityCheckFunction,
+				   sanityCheckBufferedFunction );
+		FNPTR_SET( netStream->bufferedTransportReadFunction,
+				   bufferedTransportReadFunction );
+		FNPTR_SET( netStream->bufferedTransportWriteFunction,
+				   bufferedTransportWriteFunction );
 		}
 	else
 		{
-		netStream->sanityCheckFunction = sanityCheckFunction;
-		netStream->bufferedTransportReadFunction = netStream->transportReadFunction;
-		netStream->bufferedTransportWriteFunction = netStream->transportWriteFunction;
+		FNPTR_SET( netStream->sanityCheckFunction, sanityCheckFn );
+		FNPTR_SET( netStream->bufferedTransportReadFunction,
+				   FNPTR_GET( netStream->transportReadFunction ) );
+		FNPTR_SET( netStream->bufferedTransportWriteFunction,
+				   FNPTR_GET( netStream->transportWriteFunction ) );
 		}
 	}
 #endif /* USE_TCP */

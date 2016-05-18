@@ -27,7 +27,7 @@ typedef enum {
 	SCOREBOARD_KEY_LAST
 	} SCOREBOARD_KEY_TYPE;
 
-/* The search result from looking up an entry in the scoreboard */
+/* Information for an entry in the scoreboard */
 
 typedef struct {
 	/* Scoreboard search key information */
@@ -39,7 +39,8 @@ typedef struct {
 	BUFFER_OPT_FIXED( dataSize ) \
 	const void *data;
 	int dataSize;
-	} SCOREBOARD_LOOKUP_RESULT;
+	int metaData;
+	} SCOREBOARD_INFO;
 
 /* Storage for the scoreboard state.  When passed to scoreboard functions
    it's declared as a void * because to the caller it's an opaque memory 
@@ -55,37 +56,35 @@ typedef BYTE SCOREBOARD_STATE[ 64 ];
 
 /* Session scoreboard management functions */
 
-CHECK_RETVAL_RANGE( 0, MAX_INTLENGTH ) CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 3, 5 ) ) \
-int lookupScoreboardEntry( INOUT void *scoreboardInfoPtr,
+CHECK_RETVAL_RANGE( 0, MAX_INTLENGTH ) STDC_NONNULL_ARG( ( 1, 3, 5 ) ) \
+int lookupScoreboardEntry( INOUT void *scoreboardIndexInfoPtr,
 						   IN_ENUM( SCOREBOARD_KEY ) \
 								const SCOREBOARD_KEY_TYPE keyType,
 						   IN_BUFFER( keyLength ) const void *key, 
 						   IN_LENGTH_SHORT_MIN( 2 ) const int keyLength, 
-						   OUT SCOREBOARD_LOOKUP_RESULT *lookupResult );
+						   OUT SCOREBOARD_INFO *scoreboardInfo );
 CHECK_RETVAL_RANGE( 0, MAX_INTLENGTH ) STDC_NONNULL_ARG( ( 1, 2, 4 ) ) \
-int addScoreboardEntry( INOUT void *scoreboardInfoPtr,
+int addScoreboardEntry( INOUT void *scoreboardIndexInfoPtr,
 						IN_BUFFER( keyLength ) const void *key, 
 						IN_LENGTH_SHORT_MIN( 8 ) const int keyLength, 
-						IN_BUFFER( valueLength ) const void *value, 
-						IN_LENGTH_SHORT const int valueLength );
+						const SCOREBOARD_INFO *scoreboardInfo );
 CHECK_RETVAL_RANGE( 0, MAX_INTLENGTH ) STDC_NONNULL_ARG( ( 1, 2, 4, 6 ) ) \
-int addScoreboardEntryEx( INOUT void *scoreboardInfoPtr,
+int addScoreboardEntryEx( INOUT void *scoreboardIndexInfoPtr,
 						  IN_BUFFER( keyLength ) const void *key, 
 						  IN_LENGTH_SHORT_MIN( 8 ) const int keyLength, 
 						  IN_BUFFER( keyLength ) const void *altKey, 
 						  IN_LENGTH_SHORT_MIN( 2 ) const int altKeyLength, 
-						  IN_BUFFER( valueLength ) const void *value, 
-						  IN_LENGTH_SHORT const int valueLength );
+						  const SCOREBOARD_INFO *scoreboardInfo );
 STDC_NONNULL_ARG( ( 1 ) ) \
-void deleteScoreboardEntry( INOUT void *scoreboardInfoPtr, 
+void deleteScoreboardEntry( INOUT void *scoreboardIndexInfoPtr, 
 							IN_INT_Z const int uniqueID );
 
 #ifdef USE_SSL
   CHECK_RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
-  int initScoreboard( INOUT void *scoreboardInfoPtr, 
+  int initScoreboard( INOUT void *scoreboardIndexInfoPtr, 
 					  IN_LENGTH_SHORT_MIN( 8 ) const int scoreboardEntries );
   STDC_NONNULL_ARG( ( 1 ) ) \
-  void endScoreboard( INOUT void *scoreboardInfoPtr );
+  void endScoreboard( INOUT void *scoreboardIndexInfoPtr );
 #else
   #define initScoreboard( scoreboardInfo, scoreboardSize )	CRYPT_OK
   #define endScoreboard( scoreboardInfo )

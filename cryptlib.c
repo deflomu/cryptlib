@@ -7,13 +7,19 @@
 
 #include "crypt.h"
 
-/* Prototypes for functions in init.c */
+/* Prototypes for functions in init.c.  These should actually be annotated
+   with CHECK_RETVAL_ACQUIRELOCK( MUTEX_LOCKNAME( initialisation ) and
+   RELEASELOCK( MUTEX_LOCKNAME( initialisation ) ) but the mutex locking
+   types aren't visible outside the kernel and in any case the annotation is
+   only required where the functions are defined, so we just annotate them
+   normally here */
 
 CHECK_RETVAL \
 int krnlBeginInit( void );
 void krnlCompleteInit( void );
 CHECK_RETVAL \
 int krnlBeginShutdown( void );
+RETVAL \
 int krnlCompleteShutdown( void );
 
 /* Temporary kludge for functions that have to be performed mid-startup or 
@@ -30,7 +36,6 @@ const int messageValueTrue = TRUE;
 const int messageValueFalse = FALSE;
 const int messageValueCryptOK = CRYPT_OK;
 const int messageValueCryptError = CRYPT_ERROR;
-const int messageValueCryptSignalled = CRYPT_ERROR_SIGNALLED;
 const int messageValueCryptUnused = CRYPT_UNUSED;
 const int messageValueCryptUseDefault = CRYPT_USE_DEFAULT;
 const int messageValueCursorFirst = CRYPT_CURSOR_FIRST;
@@ -54,6 +59,13 @@ const int messageValueCursorLast = CRYPT_CURSOR_LAST;
 #if defined( __APPLE__ )
   #undef USE_THREADS
 #endif /* __APPLE__  */
+
+/* If we're fuzzing we also disable threaded init in order to make the 
+   startup behaviour deterministic */
+
+#if defined( CONFIG_FUZZ )
+  #undef USE_THREADS
+#endif /* CONFIG_FUZZ */
 
 /****************************************************************************
 *																			*
@@ -145,7 +157,7 @@ CHECK_RETVAL \
 int userManagementFunction( IN_ENUM( MANAGEMENT_ACTION ) \
 								const MANAGEMENT_ACTION_TYPE action );
 
-typedef CHECK_RETVAL_FNPTR \
+typedef CHECK_RETVAL \
 		int ( *MANAGEMENT_FUNCTION )( IN_ENUM( MANAGEMENT_ACTION ) \
 										const MANAGEMENT_ACTION_TYPE action );
 
@@ -263,6 +275,9 @@ void threadedBind( const THREAD_PARAMS *threadParams )
 
 static BOOLEAN buildSanityCheck( void )
 	{
+	FNPTR_DECLARE( void *, testPtr );
+	void *testPtrResult;
+
 	/* If we're using a user-defined endianness override (i.e. it's a cross-
 	   compile from a difference architecture) perform a sanity check to 
 	   make sure that the endianness was set right.  The crypto self-test that's 
@@ -303,6 +318,15 @@ static BOOLEAN buildSanityCheck( void )
 		return( FALSE );
 		}
 #endif /* Microsoft compilers */
+
+	/* Make sure that the handling of safe function pointers is OK */
+	FNPTR_SET( testPtr, ( void * ) buildSanityCheck );
+	testPtrResult = FNPTR_GET( testPtr );
+	if( testPtrResult != buildSanityCheck )
+		{
+		DEBUG_PRINT(( "Handling of safe function pointers is broken" ));
+		return( FALSE );
+		}
 
 	return( TRUE );
 	}
@@ -355,7 +379,7 @@ int initCryptlib( void )
 									   FAILSAFE_ARRAYSIZE( preInitFunctions, \
 														   MANAGEMENT_FUNCTION ),
 									   MANAGEMENT_ACTION_PRE_INIT );
-	assert( cryptStatusOK( status ) );
+	assertNoFault( cryptStatusOK( status ) );
 	if( cryptStatusOK( status ) )
 		{
 		initLevel = 1;
@@ -363,7 +387,7 @@ int initCryptlib( void )
 										   FAILSAFE_ARRAYSIZE( initFunctions, \
 															   MANAGEMENT_FUNCTION ),
 										   MANAGEMENT_ACTION_INIT );
-		assert( cryptStatusOK( status ) );
+		assertNoFault( cryptStatusOK( status ) );
 		}
 	if( cryptStatusOK( status ) )
 		{
@@ -400,14 +424,18 @@ int initCryptlib( void )
 										   FAILSAFE_ARRAYSIZE( asyncInitFunctions, \
 															   MANAGEMENT_FUNCTION ),
 										   MANAGEMENT_ACTION_INIT );
-		assert( cryptStatusOK( status ) );
+		assertNoFault( cryptStatusOK( status ) );
 		}
 	if( cryptStatusOK( status ) )
 		{
+#ifndef CONFIG_FUZZ
 		/* Everything's set up, verify that the core crypto algorithms and 
-		   kernel security mechanisms are working as required */
+		   kernel security mechanisms are working as required, unless we're
+		   running a fuzzing build for which we don't want to get held up
+		   too long in startup */
 		status = testKernel();
-		assert( cryptStatusOK( status ) );
+		assertNoFault( cryptStatusOK( status ) );
+#endif /* CONFIG_FUZZ */
 		}
 
 	/* If anything failed, shut down the internal functions and services

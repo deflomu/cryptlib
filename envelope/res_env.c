@@ -99,6 +99,9 @@ static int cloneActionContext( OUT_HANDLE_OPT CRYPT_CONTEXT *iClonedContext,
 	REQUIRES( isHandleRangeValid( cryptContext ) );
 	REQUIRES( algorithm > CRYPT_ALGO_NONE && algorithm < CRYPT_ALGO_LAST );
 
+	/* Clear return value */
+	*iClonedContext = CRYPT_ERROR;
+
 	setMessageCreateObjectInfo( &createInfo, algorithm );
 	status = krnlSendMessage( SYSTEM_OBJECT_HANDLE,
 							  IMESSAGE_DEV_CREATEOBJECT, &createInfo,
@@ -135,8 +138,8 @@ int initEnvelopeEncryption( INOUT ENVELOPE_INFO *envelopeInfoPtr,
 							const BOOLEAN copyContext )
 	{
 	CRYPT_CONTEXT iCryptContext = cryptContext;
-	int contextAlgorithm = DUMMY_INIT, contextMode = DUMMY_INIT;
-	int blockSize = DUMMY_INIT, status;
+	int contextAlgorithm DUMMY_INIT, contextMode DUMMY_INIT;
+	int blockSize DUMMY_INIT, status;
 
 	assert( isWritePtr( envelopeInfoPtr, sizeof( ENVELOPE_INFO ) ) );
 	assert( ( iv == NULL && ivLength == 0 ) || \
@@ -387,8 +390,8 @@ static int checkMissingInfo( INOUT ENVELOPE_INFO *envelopeInfoPtr,
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
 int addKeysetInfo( INOUT ENVELOPE_INFO *envelopeInfoPtr,
-				   IN_RANGE( CRYPT_ENVINFO_KEYSET_ENCRYPT, \
-							 CRYPT_ENVINFO_KEYSET_SIGCHECK ) \
+				   IN_RANGE( CRYPT_ENVINFO_KEYSET_SIGCHECK, \
+							 CRYPT_ENVINFO_KEYSET_DECRYPT ) \
 					const CRYPT_ATTRIBUTE_TYPE keysetFunction,
 				   IN_HANDLE const CRYPT_KEYSET keyset )
 	{
@@ -597,6 +600,8 @@ static int addContextInfo( INOUT ENVELOPE_INFO *envelopeInfoPtr,
 						   INOUT_PTR ACTION_LIST **actionListHeadPtrPtr,
 						   IN_ENUM( ACTION ) const ACTION_TYPE actionType )
 	{
+	const ENV_CHECKALGO_FUNCTION checkAlgoFunction = \
+				FNPTR_GET( envelopeInfoPtr->checkAlgoFunction );
 	CRYPT_HANDLE iCryptHandle = cryptHandle;
 	ACTION_LIST *actionListPtr, *hashActionPtr;
 	ACTION_RESULT actionResult;
@@ -607,6 +612,7 @@ static int addContextInfo( INOUT ENVELOPE_INFO *envelopeInfoPtr,
 
 	REQUIRES( isHandleRangeValid( cryptHandle ) );
 	REQUIRES( actionType > ACTION_NONE && actionType < ACTION_LAST );
+	REQUIRES( checkAlgoFunction != NULL );
 
 	/* Make sure that we can still add another attribute */
 	if( !moreActionsPossible( envelopeInfoPtr->preActionList ) )
@@ -625,7 +631,7 @@ static int addContextInfo( INOUT ENVELOPE_INFO *envelopeInfoPtr,
 		}
 	if( cryptStatusError( status ) )
 		return( status );
-	if( !envelopeInfoPtr->checkAlgo( algorithm, mode ) )
+	if( !checkAlgoFunction( algorithm, mode ) )
 		return( CRYPT_ARGERROR_NUM1 );
 
 	/* If we're adding a hash action and this is a detached signature (so 
@@ -1094,8 +1100,8 @@ void initEnvResourceHandling( INOUT ENVELOPE_INFO *envelopeInfoPtr )
 	REQUIRES_V( !( envelopeInfoPtr->flags & ENVELOPE_ISDEENVELOPE ) );
 
 	/* Set the access method pointers */
-	envelopeInfoPtr->addInfo = addEnvelopeInfo;
-	envelopeInfoPtr->addInfoString = addEnvelopeInfoString;
-	envelopeInfoPtr->checkMissingInfo = checkMissingInfo;
+	FNPTR_SET( envelopeInfoPtr->addInfoFunction, addEnvelopeInfo );
+	FNPTR_SET( envelopeInfoPtr->addInfoStringFunction, addEnvelopeInfoString );
+	FNPTR_SET( envelopeInfoPtr->checkMissingInfoFunction, checkMissingInfo );
 	}
 #endif /* USE_ENVELOPES */

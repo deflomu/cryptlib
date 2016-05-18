@@ -354,20 +354,20 @@ static void printTimes( HIRES_TIME times[ NO_TESTS + 1 ][ 8 ],
 		avgTime = timeCorrSum10 / timesCount10;
 		if( noTimes <= 2 && i == 0 )
 			{
-			printf( "Pub: min.= %d, avg.= %d ", ( long ) timeMin,
+			printf( "Pub: min.= %ld, avg.= %ld ", ( long ) timeMin,
 					( long ) avgTime );
 			pubTimeMS = ( avgTime * 1000 ) / ticksPerSec;
 			}
 		else
 		if( noTimes <= 2 && i == 1 )
 			{
-			printf( "Priv: min.= %d, avg.= %d ", ( long ) timeMin,
+			printf( "Priv: min.= %ld, avg.= %ld ", ( long ) timeMin,
 					( long ) avgTime );
 			privTimeMS = ( avgTime * 1000 ) / ticksPerSec;
 			}
 		else
 			{
-			printf( "%7d", ( long ) avgTime );
+			printf( "%7ld", ( long ) avgTime );
 			if( i == 6 )
 				{
 				const long mbTime = ( long ) avgTime * 16;	/* 64kB * 15 = 1MB */
@@ -434,7 +434,7 @@ static void printTimes( HIRES_TIME times[ NO_TESTS + 1 ][ 8 ],
 		if( throughput <= 0 )
 			puts( ", throughput < 1 MB/s." );
 		else
-			printf( ", throughput %d MB/s.\n", throughput );
+			printf( ", throughput %ld MB/s.\n", throughput );
 		}
 	}
 
@@ -549,7 +549,6 @@ static void performanceTests( const CRYPT_DEVICE cryptDevice,
 	putchar( '\n' );
 	encTests( cryptDevice, CRYPT_ALGO_3DES, CRYPT_MODE_ECB, buffer, ticksPerSec );
 	encTests( cryptDevice, CRYPT_ALGO_3DES, CRYPT_MODE_CBC, buffer, ticksPerSec );
-	encTests( cryptDevice, CRYPT_ALGO_RC4, CRYPT_MODE_OFB, buffer, ticksPerSec );
 	putchar( '\n' );
 	encTests( cryptDevice, CRYPT_ALGO_AES, CRYPT_MODE_CBC, buffer, ticksPerSec );
 	putchar( '\n' );

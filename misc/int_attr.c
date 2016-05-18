@@ -41,7 +41,7 @@ typedef enum {
 
 CHECK_RETVAL_PTR STDC_NONNULL_ARG( ( 2 ) ) \
 void *attributeFindStart( IN_OPT const void *attributePtr,
-						  IN GETATTRFUNCTION getAttrFunction )
+						  IN GETATTR_FUNCTION getAttrFunction )
 	{
 	CRYPT_ATTRIBUTE_TYPE groupID;
 	int iterationCount;
@@ -82,7 +82,7 @@ void *attributeFindStart( IN_OPT const void *attributePtr,
 
 CHECK_RETVAL_PTR STDC_NONNULL_ARG( ( 2 ) ) \
 void *attributeFindEnd( IN_OPT const void *attributePtr,
-						IN GETATTRFUNCTION getAttrFunction )
+						IN GETATTR_FUNCTION getAttrFunction )
 	{
 	CRYPT_ATTRIBUTE_TYPE groupID;
 	int iterationCount;
@@ -126,7 +126,7 @@ void *attributeFindEnd( IN_OPT const void *attributePtr,
 
 CHECK_RETVAL_PTR STDC_NONNULL_ARG( ( 2 ) ) \
 void *attributeFind( IN_OPT const void *attributePtr,
-					 IN GETATTRFUNCTION getAttrFunction,
+					 IN GETATTR_FUNCTION getAttrFunction,
 					 IN_ATTRIBUTE const CRYPT_ATTRIBUTE_TYPE attributeID )
 	{
 	CRYPT_ATTRIBUTE_TYPE currAttributeID;
@@ -168,7 +168,7 @@ void *attributeFind( IN_OPT const void *attributePtr,
 
 CHECK_RETVAL_PTR STDC_NONNULL_ARG( ( 2 ) ) \
 void *attributeFindEx( IN_OPT const void *attributePtr,
-					   IN GETATTRFUNCTION getAttrFunction,
+					   IN GETATTR_FUNCTION getAttrFunction,
 					   IN_ENUM_OPT( CRYPT_ATTRIBUTE ) \
 							const CRYPT_ATTRIBUTE_TYPE groupID,
 					   IN_ENUM_OPT( CRYPT_ATTRIBUTE ) \
@@ -269,7 +269,7 @@ void *attributeFindEx( IN_OPT const void *attributePtr,
 
 CHECK_RETVAL_PTR STDC_NONNULL_ARG( ( 2 ) ) \
 void *attributeFindNextInstance( IN_OPT const void *attributePtr,
-								 IN GETATTRFUNCTION getAttrFunction )
+								 IN GETATTR_FUNCTION getAttrFunction )
 	{
 	CRYPT_ATTRIBUTE_TYPE groupID, attributeID;
 	CRYPT_ATTRIBUTE_TYPE currGroupID, currAttributeID;
@@ -333,7 +333,7 @@ void *attributeFindNextInstance( IN_OPT const void *attributePtr,
 
 CHECK_RETVAL_PTR STDC_NONNULL_ARG( ( 1, 2 ) ) \
 static const void *moveCursorByGroup( const void *currentCursor,
-									  IN GETATTRFUNCTION getAttrFunction,
+									  IN GETATTR_FUNCTION getAttrFunction,
 									  IN_ENUM( CURSOR_MOVE ) \
 										const CURSOR_MOVE_TYPE cursorMoveType, 
 									  IN_INT int count, 
@@ -414,7 +414,7 @@ static const void *moveCursorByGroup( const void *currentCursor,
 
 CHECK_RETVAL_PTR STDC_NONNULL_ARG( ( 1, 2 ) ) \
 static const void *moveCursorByAttribute( const void *currentCursor,
-										  GETATTRFUNCTION getAttrFunction,
+										  GETATTR_FUNCTION getAttrFunction,
 										  IN_ENUM( CURSOR_MOVE ) \
 											const CURSOR_MOVE_TYPE cursorMoveType, 
 										  IN_INT int count, 
@@ -486,7 +486,7 @@ static const void *moveCursorByAttribute( const void *currentCursor,
 
 CHECK_RETVAL_PTR STDC_NONNULL_ARG( ( 1, 2 ) ) \
 static const void *moveCursorByInstance( const void *currentCursor,
-										 GETATTRFUNCTION getAttrFunction,
+										 GETATTR_FUNCTION getAttrFunction,
 										 IN_ENUM( CURSOR_MOVE ) \
 											const CURSOR_MOVE_TYPE cursorMoveType, 
 										 IN_INT int count, 
@@ -567,7 +567,7 @@ static const void *moveCursorByInstance( const void *currentCursor,
 
 CHECK_RETVAL_PTR STDC_NONNULL_ARG( ( 2 ) )\
 const void *attributeMoveCursor( IN_OPT const void *currentCursor,
-								 IN GETATTRFUNCTION getAttrFunction,
+								 IN GETATTR_FUNCTION getAttrFunction,
 								 IN_ATTRIBUTE \
 									const CRYPT_ATTRIBUTE_TYPE attributeMoveType,
 								 IN_RANGE( CRYPT_CURSOR_LAST, \

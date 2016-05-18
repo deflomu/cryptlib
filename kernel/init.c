@@ -46,6 +46,8 @@ static KERNEL_DATA krnlDataBlock = { 0 }, *krnlData;
 THREADFUNC_DEFINE( threadServiceFunction, threadInfoPtr )
 	{
 	const THREAD_INFO *threadInfo = ( THREAD_INFO * ) threadInfoPtr;
+	const THREAD_FUNCTION threadFunction = \
+							FNPTR_GET( threadInfo->threadFunction );
 	ORIGINAL_INT_VAR( intParam, threadInfo->threadParams.intParam );
 	ORIGINAL_INT_VAR( semaphore, threadInfo->semaphore );
 		/* Note that the above two macros give initialised-but-not-referenced
@@ -55,12 +57,19 @@ THREADFUNC_DEFINE( threadServiceFunction, threadInfoPtr )
 	assert( threadServiceFunction != NULL );
 			/* We can't use a REQUIRES() because of the polymorphic return 
 			   type */
+	if( threadFunction == NULL )
+		{
+		/* It's a bit unclear what we should do in this case since it's a 
+		   shouldn't-occur condition, exiting now seems to be the least
+		   unsafe action */
+		THREAD_EXIT( threadInfo->syncHandle );
+		}
 
 	/* We're running as a thread, call the thread service function and clear
 	   the associated semaphore (if there is one) when we're done.  We check
 	   to make sure that the thread params are unchanged to catch erroneous
 	   use of stack-based storage for the parameter data */
-	threadInfo->threadFunction( &threadInfo->threadParams );
+	threadFunction( &threadInfo->threadParams );
 	assert( threadInfo->threadParams.intParam == ORIGINAL_VALUE( intParam ) );
 	assert( threadInfo->semaphore == ORIGINAL_VALUE( semaphore ) );
 	if( threadInfo->semaphore != SEMAPHORE_NONE )
@@ -97,7 +106,7 @@ int krnlDispatchThread( THREAD_FUNCTION threadFunction,
 
 	/* Initialise the thread parameters */
 	memset( threadInfo, 0, sizeof( THREAD_INFO ) );
-	threadInfo->threadFunction = threadFunction;
+	FNPTR_SET( threadInfo->threadFunction, threadFunction );
 	threadInfo->threadParams.ptrParam = ptrParam;
 	threadInfo->threadParams.intParam = intParam;
 	threadInfo->semaphore = semaphore;
@@ -242,7 +251,7 @@ void postShutdown( void )
    mutex locked between the two calls to allow external initialisation of
    further, non-kernel-related items */
 
-CHECK_RETVAL \
+CHECK_RETVAL_ACQUIRELOCK( MUTEX_LOCKNAME( initialisation ) ) \
 int krnlBeginInit( void )
 	{
 	int status;
@@ -313,15 +322,22 @@ int krnlBeginInit( void )
 	if( cryptStatusError( status ) )
 		{
 		MUTEX_UNLOCK( initialisation );
+#ifdef CONFIG_FAULT_MALLOC
+		/* If we're using memory fault-injection then a failure at this 
+		   point is expected */
+		return( CRYPT_ERROR_MEMORY );
+#else
 		retIntError();
+#endif /* CONFIG_FAULT_MALLOC */
 		}
 
 	/* The kernel data block has been initialised */
 	krnlData->initLevel = INIT_LEVEL_KRNLDATA;
 
-	return( TRUE );
+	return( CRYPT_OK );
 	}
 
+RELEASELOCK( MUTEX_LOCKNAME( initialisation ) ) \
 void krnlCompleteInit( void )
 	{
 	/* We've completed the initialisation process */
@@ -345,7 +361,7 @@ void krnlCompleteInit( void )
 		(shutdownLevel = SHUTDOWN_LEVEL_MUTEXES);
 	clear kernel data; */
 
-CHECK_RETVAL \
+CHECK_RETVAL_ACQUIRELOCK( MUTEX_LOCKNAME( initialisation ) ) \
 int krnlBeginShutdown( void )
 	{
 	/* Lock the initialisation mutex to make sure that other threads don't
@@ -353,7 +369,8 @@ int krnlBeginShutdown( void )
 	MUTEX_LOCK( initialisation );
 
 	/* We can only begin a shutdown if we're fully initialised */
-	REQUIRES( krnlData->initLevel == INIT_LEVEL_FULL );
+	REQUIRES_MUTEX( krnlData->initLevel == INIT_LEVEL_FULL, \
+					initialisation );
 
 	/* If we're already shut down, don't to anything */
 	if( krnlData->initLevel <= INIT_LEVEL_NONE )
@@ -370,6 +387,7 @@ int krnlBeginShutdown( void )
 	return( CRYPT_OK );
 	}
 
+RETVAL_RELEASELOCK( MUTEX_LOCKNAME( initialisation ) ) \
 int krnlCompleteShutdown( void )
 	{
 	/* Once the kernel objects have been destroyed, we're in the closing-down

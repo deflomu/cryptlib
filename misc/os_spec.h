@@ -112,12 +112,18 @@
 #endif /* VMS */
 
 #if defined( __APPLE__ )
-  /* Apple provides an environment-specific file that gives you detailed
-	 information about the target enviroment */
+  /* Apple provides an environment-specific file that provides detailed
+	 information about the target enviroment, defining TARGET_OS_xxx to 1
+	 for a given target environment */
   #include <TargetConditionals.h>
-  #if defined( TARGET_OS_IPHONE ) || defined( TARGET_IPHONE_SIMULATOR )
+  #if TARGET_OS_IPHONE || TARGET_IPHONE_SIMULATOR
 	#define __iOS__
-  #endif /* iOS/iOS simulator */
+  #elif TARGET_OS_WATCH
+	/* It's a bit unclear what the OS for Apple's watch will eventually end 
+	   up as, for now we treat it as iOS since we're only accessing the low-
+	   level functionality */
+	#define __iOS__
+  #endif /* iOS aliases */
 #endif /* __APPLE__ */
 
 /* In some cases we're using a Windows system as an emulated cross-
@@ -127,29 +133,46 @@
    under Windows it's already typedef'd which leads to error messages */
 
 #if defined( __WIN32__ ) && ( _MSC_VER == 1200 ) && defined( CROSSCOMPILE )
-  /* Embedded OS variant */
-//  #define __EmbOS__ 
-//  #define __FreeRTOS__
-//	#define __ITRON__
-//	#define __Nucleus__
-//	#define __RTEMS__
-//	#define __ThreadX__
-//	#define __TKernel__
-//  #define __UCOS__
+  /* Embedded OS variant.  Remember to change Project | Settings | C/C++ |
+	 Preprocessor | Additional include directories as per the code 
+	 comments */
+//	#define __ARINC653__	/* Extra include: ./,./embedded/arinc653 */
+//	#define __CMSIS__		/* Extra include: ./,./embedded/cmsis */
+//  #define __EmbOS__		/* Extra include: ./,./embedded/embos */
+//	#define __FreeRTOS__	/* Extra include: ./,./embedded/freertos */
+//	#define __ITRON__		/* Extra include: ./,./embedded/itron */
+//	#define __Nucleus__		/* Extra include: ./,./embedded/nucleus */
+//	#define __RTEMS__		/* Extra include: ./,./embedded/rtems */
+//	#define __SMX__			/* Extra include: ./,./embedded/smx/xsmx,./embedded/smx/xfs */
+//	#define __ThreadX__		/* Extra include: ./,./embedded/threadx */
+//	#define __TKernel__		/* Extra include: ./,./embedded/tk */
+//  #define __UCOS__		/* Extra include: ./,./embedded/ucos */
+	#define __VxWorks__		/* Extra include: ./,./embedded/vxworks/,./embedded/vxworks/wrn/coreip/ */
+
+  /* Embedded OS additions (filesystems, networking).  Include directory 
+     changes as before */
+  #define USE_LWIP			/* Extra include: ...,./embedded */
+							/* LWIP uses absolute paths, so the 'lwip' in 
+							   the path is part of the #include */
 
   /* Undo Windows defines */
   #undef __WINDOWS__
   #undef __WIN32__
-  #if !defined( __Nucleus__ ) && !defined( __UCOS__ )
+  #if !defined( __Nucleus__ ) && !defined( __SMX__ ) && !defined( __UCOS__ )
 	#define BOOLEAN			FNORDIAN
   #endif /* Systems that typedef BOOLEAN */
   #ifdef __Nucleus__
 	#undef FAR
   #endif /* Systems that define FAR */
 
+  /* Embedded SDK-specific additional defines */
+  #if defined( __VxWorks__ ) && !defined( _WRS_KERNEL )
+	#define _WRS_KERNEL		1
+  #endif /* SDK-specific defines */
+
   /* In addition '__i386__' (assuming gcc with an x86 target) needs to be 
      defined globally via Project Settings | C/C++ | Preprocessor.  This
-	 are already defined for the 'Crosscompile' build configuration */
+	 is already defined for the 'Crosscompile' build configuration */
 #endif /* Windows emulated cross-compile environment */
 
 #ifdef _SCCTK
@@ -175,7 +198,10 @@
 	Visual C++ 7.1 (VC++.NET/2003) _MSC_VER = 1310
 	Visual C++ 8.0 (VC2005) _MSC_VER = 1400 
 	Visual C++ 9.0 (VC2008) _MSC_VER = 1500
-	Visual C++ 10.0 (VC2010) _MSC_VER = 1600 */
+	Visual C++ 10.0 (VC2010) _MSC_VER = 1600 
+	Visual C++ 11.0 (VC2012) _MSC_VER = 1700
+	Visual C++ 12.0 (VC2013) _MSC_VER = 1800 
+	Visual C++ 14.0 (VC2015) _MSC_VER = 1900 */
 
 #ifdef _MSC_VER
   #define VC_16BIT( version )		( version <= 800 )
@@ -184,10 +210,14 @@
   #define VC_LT_2005( version )		( version < 1400 )
   #define VC_GE_2005( version )		( version >= 1400 )
   #define VC_GE_2008( version )		( version >= 1500 )
+  #define VC_LT_2010( version )		( version < 1600 )
   #define VC_GE_2010( version )		( version >= 1600 )
+  #define VC_GE_2012( version )		( version >= 1700 )
+  #define VC_GE_2013( version )		( version >= 1800 )
+  #define VC_GE_2015( version )		( version >= 1900 )
 #else
   /* These aren't specifically required on non-VC++ systems, but some 
-     preprocessors get confused if they aren't defined since they're used */
+     preprocessors get confused if they aren't defined */
   #define VC_16BIT( version )		0
   #define VC_LE_VC6( version )		0
   #define VC_GE_2002( version )		0
@@ -195,6 +225,9 @@
   #define VC_GE_2005( version )		0
   #define VC_GE_2008( version )		0
   #define VC_GE_2010( version )		0
+  #define VC_GE_2012( version )		0
+  #define VC_GE_2013( version )		0
+  #define VC_GE_2015( version )		0
 #endif /* Visual C++ */
 
 /* If we're compiling under VC++ with the maximum level of warnings, turn
@@ -266,7 +299,7 @@
 	#pragma warning( disable: 6011 )/* Deferencing NULL pointer */
   #endif /* VC++ with source analysis enabled */
 
-  /* Windows DDK fre builds treat warnings as errors and the DDK headers
+  /* Windows DDK free builds treat warnings as errors and the DDK headers 
 	 have some problems so we have to disable additional warnings */
   #ifdef WIN_DDK
 	#pragma warning( disable: 4242 )/* MS-only bit field type used */
@@ -280,12 +313,20 @@
   #pragma warning( disable: 4100 )	/* Unreferenced parameter */
 #endif /* Visual C++ */
 
-/* Under VC++ a number of warnings are disabled by default, including some 
-   potentially useful ones, so we re-enable them.  The warnings are:
+/* Under VC++/VS a number of warnings are disabled by default, including 
+   some potentially useful ones, so we re-enable them.  The warnings are:
 
+	C4242 'identifier': conversion from 'type1' to 'type2', possible loss of 
+		  data.
+	C4255 'function': no function prototype given: converting '()' to 
+		  '(void)'.
 	C4287 'operator': unsigned/negative constant mismatch.
 	C4296 'operator': expression is always false.
+	C4302 'conversion' : truncation from 'type 1' to 'type 2'.
+	C4311 'variable' : pointer truncation from 'type' to 'type'.
 	C4431 missing type specifier - int assumed.
+	C4545 expression before comma evaluates to a function which is missing 
+		  an argument list.
 	C4546 function call before comma missing argument list.
 	C4547 'operator' : operator before comma has no effect; expected 
 		  operator with side-effect.
@@ -294,6 +335,7 @@
 	C4549 'operator' : operator before comma has no effect; did you intend 
 		  'operator'?
 	C4555 expression has no effect; expected expression with side-effect.
+	C4619 #pragma warning : there is no warning number 'number'.
 	C4668 'symbol' is not defined as a preprocessor macro, replacing with 
 		  '0' for 'directives'.  
 		  Note that enabling this check causes warnings in Windows header 
@@ -310,14 +352,20 @@
    presence of empty controlled statements, e.g. 'if( foo; )' */
 
 #if defined( _MSC_VER )
+  #pragma warning( 3: 4242 )
+  #pragma warning( 3: 4255 )
   #pragma warning( 3: 4287 )
+  #pragma warning( 3: 4302 )
+  #pragma warning( 3: 4311 )
   #pragma warning( 3: 4296 )
   #pragma warning( 3: 4431 )
+  #pragma warning( 3: 4545 )
   #pragma warning( 3: 4546 )
   #pragma warning( 3: 4547 )
   #pragma warning( 3: 4548 )
   #pragma warning( 3: 4549 )
   #pragma warning( 3: 4555 )
+  #pragma warning( 3: 4619 )
   #pragma warning( 3: 4668 )
   #pragma warning( 3: 4826 )
 #endif /* Visual C++ */
@@ -355,6 +403,12 @@
   #pragma warn +stv						/* Structure passed by value */
 #endif /* Broken BC++ 5.0x warning handling */
 
+/* The TI compiler needs to have a few annoying warnings disabled */
+
+#if defined( __TI_COMPILER_VERSION__ )
+  #pragma diag_suppress 190				/* enum vs. int */
+#endif /* TI compiler */
+
 /* All Windows CE functions are Unicode-only, this was an attempt to clean
    up the ASCII vs. Unicode kludges in Win32 but unfortunately was made just
    before UTF8 took off.  Because UTF8 allows everyone to keep using their
@@ -370,6 +424,32 @@
 #ifdef __WINCE__
   #define UNICODE_CHARS
 #endif /* WinCE */
+
+/* Include stdint.h if it's available, since this greatly simplifies the
+   handling of data types in a portable manner */
+
+#if defined( __STDC_VERSION__ ) && ( __STDC_VERSION__ >= 199901L ) 
+  /* stdint.h via C99 compatibility */
+  #include <stdint.h>
+#elif defined( __GNUC__ ) && ( __GNUC__ > 3 ) 
+  /* stdint.h via GNU headers */
+  #include <stdint.h>
+#elif defined( _MSC_VER ) && VC_GE_2015( _MSC_VER )
+  /* stdint.h via Visual Studio */
+  #include <stdint.h>
+#elif defined( _MSC_VER )
+  #ifdef __WIN64__
+	typedef unsigned __int64	uintptr_t;
+  #else
+	typedef unsigned long		uintptr_t;
+  #endif /* 64- vs 32-bit systems */
+#else
+  #if ULONG_MAX > 0xFFFFFFFFUL
+	typedef unsigned long long	uintptr_t;
+  #else
+	typedef unsigned long		uintptr_t;
+  #endif /* 64- vs 32-bit systems */
+#endif /* Various stdint.h options */
 
 /* If we're compiling on the AS/400, make enums a fixed size rather than
    using the variable-length values that IBM compilers default to, and force
@@ -413,10 +493,8 @@
   #error Need to define a Symbian target architecture type, e.g. ARM or x86
 #endif /* __SYMBIAN32__ && !( __MARM__ || __EMU_SYMBIAN_OS__ ) */
 
-/* A few rare operations are word-size-dependant, which we detect via
-   limits.h */
+/* A few rare operations are word-size-dependant */
 
-#include <limits.h>
 #if INT_MAX <= 32768L
   #define SYSTEM_16BIT
 #elif ULONG_MAX > 0xFFFFFFFFUL
@@ -447,13 +525,22 @@ typedef unsigned char		BYTE;
 #if defined( __STDC_VERSION__ ) && ( __STDC_VERSION__ >= 199901L ) && 0
   #include <stdbool.h>
   typedef bool              BOOLEAN;
-#elif defined( __WIN32__ ) || defined( __WINCE__ ) 
+#elif defined( __WIN32__ ) || defined( __WINCE__ )
   /* VC++ typedefs BOOLEAN so we need to use the preprocessor to override it */
   #define BOOLEAN			int
-#elif defined( __UCOS__ )
-  /* uC/OS-II typedefs BOOLEAN and it's probably not worth changing so we 
-     leave it as is */
-  #define BOOLEAN			int
+#elif defined( __UCOS__ ) || defined( __SMX__ )
+  /* Some OSes typedef BOOLEAN themselves so we set it as a #define, which 
+	 means that we can then work around the typedef by undefining and
+	 redefining it around the include of the OS-specific headers:
+
+		#undef BOOLEAN
+		#include <smx.h>
+		#define BOOLEAN int */
+  #if defined( __SMX__ ) && !defined( _MSC_VER )
+	typedef int				BOOLEAN
+  #else
+	#define BOOLEAN			int
+  #endif /* OS-specific BOOLEAN juggling */
 #elif defined( __Nucleus__ )
   /* Nucleus defines BOOLEAN as 'unsigned char' so we override it to be an
      int */
@@ -491,17 +578,29 @@ typedef unsigned char		BYTE;
   #include <pkgconf/system.h>
 #endif /* __ECOS__ */
 
-/* If we're using DOS or Windows as a cross-development platform, we need 
-   the OS-specific values defined initially to get the types right but don't 
-   want it defined later on since the target platform won't really be 
-   running DOS or Windows, so we undefine them after the types have been 
-   sorted out */
+/* The VxWorks SDK defines the value 'SH' (to indicate the use of SuperH 
+   CPU family) in vxCpu.h which conflicts with the 'struct SH' in ssh.h. 
+   To fix this we undefine it, this shouldn't be a problem since the define 
+   SH32 is set to the same value as SH and presumably no-one will be using 
+   the basic 20-year-old SuperH any more.
 
-#ifdef __IBM4758__
-  #undef __MSDOS__
-  #undef __WINDOWS__
-  #undef __WIN32__
-#endif /* IBM 4758 */
+   VxWorks also uses some global symbols that clash with cryptlib's ones, 
+   to resolve this we redefine the cryptlib ones to have a 'cl_' prefix */
+
+#ifdef __VxWorks__
+  /* Correct the use of the VxWorks preprocessor define 'SH' overriding 
+     'struct SH' in ssh.h */
+  #if defined( SH )
+	#undef SH
+  #endif /* SH */
+
+  /* Correct clashing global symbols in VxWorks */
+  #define setSerialNumber		cl_setSerialNumber
+  #define inflate				cl_inflate
+  #define addAction				cl_addAction
+  #define inflate_copyright		cl_inflate_copyright
+  #define zlibVersion			cl_zlibVersion
+#endif /* __VxWorks__ */
 
 /* Some versions of the WinCE SDK define 'interface' as part of a complex 
    series of kludges for OLE support (made even more amusing by the fact 
@@ -632,24 +731,6 @@ typedef unsigned char		BYTE;
 
 #if defined( __WIN32__ ) && \
 	!( defined( __WIN64__ ) || defined( __BORLANDC__ ) || defined( NO_ASM ) )
-  /* Unlike the equivalent crypto code, the MD5, RIPEMD-160, and SHA-1
-	 hashing code needs special defines set to enable the use of asm
-	 alternatives.  Since this works by triggering redefines of function
-	 names in the source code, we can only do this under Windows because for
-	 other systems you'd need to conditionally alter the makefile as well.
-	 Since these two defines were left accidentally unset for about five
-	 years and were only noticed when someone benchmarked the code against
-	 BSAFE, it's unlikely that this is of any real concern */
-  #define MD5_ASM
-  #define SHA1_ASM
-  #define RMD160_ASM
-
-  /* Turn on bignum asm as well.  By default this is done anyway, but the
-     x86 asm code contains some additional routines not present in the
-     asm modules for other CPUs so we have to define this to disable the
-     equivalent C code, which must be present for non-x86 asm modules */
-  #define BN_ASM
-
   /* Enable use of the AES ASM code */
   #define AES_ASM
 
@@ -691,8 +772,8 @@ typedef unsigned char		BYTE;
   #elif defined( __sh__ )
 	#define verifyVAList( x ) TRUE
   #endif /* Architecture-specific scalar va_lists */
-#elif defined( __RVCT2_1__ )
-  /* The RealView compiler has the same issue */
+#elif defined( __RVCT2_1__ ) || defined( __IAR_SYSTEMS_ICC__ )
+  /* The RealView and IAR compilers have the same issue */
   #define verifyVAList( x ) TRUE
 #endif /* Nonstandard va_list types */
 #ifndef verifyVAList
@@ -734,6 +815,17 @@ typedef unsigned char		BYTE;
 		  __builtin_expect( ( status ) == CRYPT_OK, 1 )
 #endif /* gcc 3.x and newer */
 
+/* Nucleus has it's own functions for allocating and freeing memory, so
+   we provide wrappers for them that override the default clAlloc()/clFree()
+   mappings */
+
+#ifdef __Nucleus__ 
+  #define clAlloc( string, size )		clAllocFn( size )
+  #define clFree( string, memblock )	clFreeFn( memblock )
+  void *clAllocFn( size_t size );
+  void clFreeFn( void *memblock );
+#endif /* __Nucleus__ */
+
 /****************************************************************************
 *																			*
 *								Dynamic Loading Support						*
@@ -754,11 +846,6 @@ typedef unsigned char		BYTE;
 
   /* Macros to map OS-specific dynamic-load values to generic ones */
   #if defined( __WINDOWS__ )
-	#ifndef _ANALYSE_DEFINED
-	  #define IN_STRING	/* No-op out PREfast annotation for non-clib files */
-	#endif /* Included via non-cryptlib source file */
-	HMODULE WINAPI SafeLoadLibrary( IN_STRING LPCTSTR lpFileName );
-
 	#define INSTANCE_HANDLE		HINSTANCE
 	#define NULL_INSTANCE		( HINSTANCE ) NULL
 	#ifdef __WINCE__
@@ -855,6 +942,16 @@ typedef unsigned char		BYTE;
 	#endif /* Big vs.little-endian */
   #elif defined( __m68k__  )
 	#define DATA_BIGENDIAN		/* 68K always big-endian */
+  #elif defined( __TI_COMPILER_VERSION__ )
+	/* The TI compiler can masquerade as gcc so we need to check for it 
+	   before we check for Gnu indicators */
+	#if CPU_BYTE_ORDER == LOW_BYTE_FIRST
+	  #define DATA_LITTLEENDIAN
+	#elif CPU_BYTE_ORDER == HIGH_BYTE_FIRST
+	  #define DATA_BIGENDIAN
+	#else
+	  #error Couldnt get endianness from CPU_BYTE_ORDER
+	#endif /* TI compiler endianness detection */
   #elif defined __GNUC__
 	#ifdef BYTES_BIG_ENDIAN
 	  #define DATA_BIGENDIAN	/* Big-endian byte order */
@@ -925,17 +1022,20 @@ typedef unsigned char		BYTE;
 	#error Need to add a MAX_PATH_LENGTH define in misc/os_spec.h
   #endif /* PATH_MAX, MAX_PATH, or FILENAME_MAX */
 #endif /* PATH_MAX */
+#if MAX_PATH_LENGTH <= 32
+  #error MAX_PATH_LENGTH is <= 32 characters, check your build environment
+#endif /* Too-short MAX_PATH values */
 
 /* SunOS 4 doesn't have memmove(), but Solaris does, so we define memmove()
    to bcopy() under 4.  In addition SunOS doesn't define the fseek()
    position indicators so we define these as well */
 
 #if defined( __UNIX__ ) && defined( sun ) && ( OSVERSION == 4 )
-  #define memmove	bcopy
+  #define memmove				bcopy
 
-  #define SEEK_SET	0
-  #define SEEK_CUR	1
-  #define SEEK_END	2
+  #define SEEK_SET				0
+  #define SEEK_CUR				1
+  #define SEEK_END				2
 #endif /* SunOS 4 */
 
 /****************************************************************************
@@ -945,7 +1045,7 @@ typedef unsigned char		BYTE;
 ****************************************************************************/
 
 /* Widechar handling.  Most systems now support this, the only support that
-   we only require is the wchar_t type define.
+   we require is the wchar_t type define.
 
    Unfortunately in order to check for explicitly enabled widechar support
    via config.h we have to include config.h at this point, because this
@@ -970,14 +1070,6 @@ typedef unsigned char		BYTE;
 		 defined( __XMK__ ) )
 	#include <wchar.h>
   #endif /* Systems with widechar support in stdlib.h */
-  #define WCSIZE	( sizeof( wchar_t ) )
-
-  #if defined( __MSDOS16__ ) && !defined( __BORLANDC__ )
-	typedef unsigned short int wchar_t;	/* Widechar data type */
-  #endif /* OSes that don't support widechars */
-  #if defined( __BORLANDC__ ) && ( __BORLANDC__ == 0x410 )
-	#define wchar_t unsigned short int;	/* BC++ 3.1 has an 8-bit wchar_t */
-  #endif /* BC++ 3.1 */
 #else
   /* No native widechar support, define the necesary types ourselves unless
 	 we're running under older OS X (Darwin 6.x), which defines wchar_t in
@@ -985,55 +1077,45 @@ typedef unsigned char		BYTE;
 	 defines it in wchar.h but then defines it differently in stddef.h, and
 	 in any case has no wchar support present */
   #if !( defined( __APPLE__ ) || defined( __MVS__ ) || \
-		 defined( __OpenBSD__ ) || defined( __PALMOS__ ) )
+		 defined( __OpenBSD__ ) || defined( __PALMOS__ ) || \
+		 defined( __SMX__ ) )
 	typedef unsigned short int wchar_t;
   #endif /* __APPLE__ */
-  #define WCSIZE	( sizeof( wchar_t ) )
 #endif /* USE_WIDECHARS */
-
-/* It's theoretically possible that an implementation uses widechars larger
-   than 16-bit Unicode values, however if we check for this at runtime then
-   some compilers will warn about unreachable code or always-true/false 
-   conditions.  To handle this we make the check conditional on whether it's 
-   strictly necessary */
-
-#if ( INT_MAX > 0xFFFFL )
-  #if defined( __WIN32__ ) || defined( __WINCE__ )
-	/* Windows always has 16-bit Unicode wchars */
-  #else
-	#define CHECK_WCSIZE
-  #endif /* Compiler-specific checks */
-#endif /* > 16-bit OSes */
-
+#define WCSIZE					( sizeof( wchar_t ) )
+#ifndef WCHAR_MAX
+  #define WCHAR_MAX				( ( wchar_t ) -1 )
+#endif /* !WCHAR_MAX */
 
 /* The EOL convention used when outputting text.  Technically speaking 
-   Nucleus and XMK don't use any particular EOL convention, but since the 
-   typical development environment is debug output sent to a Windows 
+   Nucleus, SMX, and XMK don't use any particular EOL convention, but since 
+   the typical development environment is debug output sent to a Windows 
    terminal emulator, we use CRLF */
 
 #if defined( __MSDOS16__ ) || defined( __MSDOS32__ ) || \
 	defined( __Nucleus__ ) || defined( __OS2__ ) || \
-	defined( __SYMBIAN32__ ) || defined( __WINDOWS__ ) || defined( __XMK__ )
-  #define EOL		"\r\n"
-  #define EOL_LEN	2
+	defined( __SMX__ ) || defined( __SYMBIAN32__ ) || \
+	defined( __WINDOWS__ ) || defined( __XMK__ )
+  #define EOL					"\r\n"
+  #define EOL_LEN				2
 #elif ( defined( __APPLE__ ) && !defined( __MAC__ ) ) || \
 	  defined( __BEOS__ ) || defined( __IBM4758__ ) || \
 	  defined( __MVS__ ) || defined( __PALMOS__ ) || \
 	  defined( __TANDEM_NSK__ ) || defined( __TANDEM_OSS__ ) || \
 	  defined( __UNIX__ ) || defined( __VMCMS__ )
-  #define EOL		"\n"
-  #define EOL_LEN	1
+  #define EOL					"\n"
+  #define EOL_LEN				1
 #elif defined( __MAC__ )
-  #define EOL		"\r"
-  #define EOL_LEN	1
+  #define EOL					"\r"
+  #define EOL_LEN				1
 #elif defined( USE_EMBEDDED_OS )
   /* For embedded OSes we assume a generic Unix-like text environment, these 
 	 aren't exactly used for interactive operations like text editing so 
 	 there's usually no fixed text format, and many will handle both CRLF 
 	 and LF-only text, with the lowest common denominator being the Unix-
 	 style LF-only */
-  #define EOL "\n"
-  #define EOL_LEN 1
+  #define EOL					"\n"
+  #define EOL_LEN				1
 #else
   #error "You need to add the OS-specific define to enable end-of-line handling"
 #endif /* OS-specific EOL markers */
@@ -1069,12 +1151,12 @@ typedef unsigned char		BYTE;
    uses EBCDIC */
 
 #ifdef EBCDIC_CHARS
-  #define ASCII_ALPHA		0x01
-  #define ASCII_LOWER		0x02
-  #define ASCII_NUMERIC		0x04
-  #define ASCII_SPACE		0x08
-  #define ASCII_UPPER		0x10
-  #define ASCII_HEX			0x20
+  #define ASCII_ALPHA			0x01
+  #define ASCII_LOWER			0x02
+  #define ASCII_NUMERIC			0x04
+  #define ASCII_SPACE			0x08
+  #define ASCII_UPPER			0x10
+  #define ASCII_HEX				0x20
   extern const BYTE asciiCtypeTbl[];
 
   #define isAlnum( ch ) \
@@ -1095,8 +1177,8 @@ typedef unsigned char		BYTE;
 			( byteToInt( ch ) ) - 32 : ( byteToInt( ch ) ) )
   int strCompareZ( const char *src, const char *dest );
   int strCompare( const char *src, const char *dest, int length );
-  #define sprintf_s			sPrintf_s
-  #define vsprintf_s		sPrintf_s
+  #define sprintf_s				sPrintf_s
+  #define vsprintf_s			sPrintf_s
 #else
   #if defined( __Nucleus__ )
 	#include <nu_ctype.h>
@@ -1105,17 +1187,17 @@ typedef unsigned char		BYTE;
 	#include <ctype.h>
   #endif /* OS-specific includes */
 
-  #define isAlnum( ch )		isalnum( byteToInt( ch ) )
-  #define isAlpha( ch )		isalpha( byteToInt( ch ) )
-  #define isDigit( ch )		isdigit( byteToInt( ch ) )
-  #define isPrint( ch )		isprint( byteToInt( ch ) )
-  #define isXDigit( ch )	isxdigit( byteToInt( ch ) )
-  #define toLower( ch )		tolower( byteToInt( ch ) )
-  #define toUpper( ch )		toupper( byteToInt( ch ) )
+  #define isAlnum( ch )			isalnum( byteToInt( ch ) )
+  #define isAlpha( ch )			isalpha( byteToInt( ch ) )
+  #define isDigit( ch )			isdigit( byteToInt( ch ) )
+  #define isPrint( ch )			isprint( byteToInt( ch ) )
+  #define isXDigit( ch )		isxdigit( byteToInt( ch ) )
+  #define toLower( ch )			tolower( byteToInt( ch ) )
+  #define toUpper( ch )			toupper( byteToInt( ch ) )
   #define strCompareZ( str1, str2 )	\
-							stricmp( str1, str2 )
+								stricmp( str1, str2 )
   #define strCompare( str1, str2, len )	\
-							strnicmp( str1, str2, len )
+								strnicmp( str1, str2, len )
 #endif /* EBCDIC_CHARS */
 
 /* SunOS and older Slowaris have broken sprintf() handling.  In SunOS 4.x
@@ -1130,7 +1212,7 @@ typedef unsigned char		BYTE;
 					const char *format, ... );
 
   #undef sPrintf_s
-  #define sPrintf_s			fixedSprintf
+  #define sPrintf_s				fixedSprintf
 #endif /* Old SunOS */
 
 /* Borland C++ before 5.50 doesn't have snprintf() or vsnprintf() */
@@ -1189,12 +1271,12 @@ typedef unsigned char		BYTE;
 	#define strlcpy_s( s1, s1max, s2 )	strncpy_s( s1, s1max, s2, _TRUNCATE )
 	#define strlcat_s( s1, s1max, s2 )	strncat_s( s1, s1max, s2, _TRUNCATE )
   #else
-	#define gmTime_s						gmtime_s
-  #endif /* VC++ 2005 */
+	#define gmTime_s					gmtime_s
+  #endif /* VC++ >= 2005 */
 #else
   /* String functions.  The OpenBSD strlcpy()/strlcat() functions with their
      truncation semantics are quite useful so we use these as well, 
-	 overlaying them with a macro that makes them match the TR 24731 look 
+	 overlaying them with a macro that make them match the TR 24731 look 
 	 and feel */
   #define strcpy_s( s1, s1max, s2 )		strcpy( s1, s2 )
   #if defined( __UNIX__ ) && \
@@ -1236,10 +1318,19 @@ typedef unsigned char		BYTE;
 
 	#define sprintf_s					snprintf
 	#define vsprintf_s					vsnprintf
-  #endif /* VC++ 6 or below */
+  #endif /* Compiler-specific safe printf() support */
 
-  /* Misc.functions */
-  #define gmTime_s( timer, result )		gmtime( timer )
+  /* Misc.functions.  gmtime() is an ugly non-thread-safe function that runs 
+     into the same problems as gethostbyname() (see the long comment in 
+	 io/tcp.h), to deal with this as best we can we map it to the reentrant 
+	 gmtime_r() if it's available.  In addition some OSes use TLS for the
+	 result value so it's handled automatically, see the comments in 
+	 io/tcp.h for more on this */
+  #if defined( USE_THREADS ) && defined( __GLIBC__ ) && ( __GLIBC__ >= 2 ) 
+	#define gmTime_s					gmtime_r
+  #else
+	#define gmTime_s( timer, result )	gmtime( timer )
+  #endif /* USE_THREADS and libraries that provide gmtime_r() */
 #endif /* TR 24731 safe stdlib extensions */
 
 /****************************************************************************
@@ -1252,5 +1343,23 @@ typedef unsigned char		BYTE;
 
 void *ptr_align( const void *ptr, const int units );
 int ptr_diff( const void *ptr1, const void *ptr2 );
+
+/* Check whether a pointer is aligned to a particular value, used by some
+   low-level functions that check for potentially unaligned accesses and 
+   clean them up if possible.  This is mostly a hygiene check in that if it
+   can't be easily implemented we continue anyway but with the possible 
+   overhead of an unaligned-access fixup, thus the _OPT qualifier.
+   
+   The apparently redundant cast to void * before the uintptr_t is necessary 
+   because the conversion is only guaranteed for a void *, so if it's some 
+   other type of pointer then we have to cast it to a void * first */
+
+#if ( defined( __STDC_VERSION__ ) && ( __STDC_VERSION__ >= 199901L ) ) || \
+	( defined( _MSC_VER ) && VC_GE_2005( _MSC_VER ) )
+  #define IS_ALIGNED_OPT( pointer, value ) \
+		  ( ( ( uintptr_t )( const void * )( pointer ) ) % ( value ) == 0 )
+#else
+  #define IS_ALIGNED_OPT( pointer, value )	TRUE
+#endif /* C99 check */
 
 #endif /* _OSSPEC_DEFINED */

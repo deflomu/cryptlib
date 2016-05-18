@@ -28,9 +28,9 @@
 #define HMAC_DATASIZE		64
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2, 3, 5, 7, 8 ) ) \
-static int prfInit( IN const HASHFUNCTION hashFunction, 
-					IN const HASHFUNCTION_ATOMIC hashFunctionAtomic,
-					INOUT TYPECAST( HASHINFO ) void *hashState, 
+static int prfInit( IN const HASH_FUNCTION hashFunction, 
+					IN const HASH_FUNCTION_ATOMIC hashFunctionAtomic,
+					OUT TYPECAST( HASHINFO ) void *hashState, 
 					IN_LENGTH_HASH const int hashSize, 
 					OUT_BUFFER( processedKeyMaxLength, *processedKeyLength ) \
 						void *processedKey, 
@@ -70,16 +70,26 @@ static int prfInit( IN const HASHFUNCTION hashFunction,
 		}
 	else
 		{
-		/* Copy the key to internal storage */
+		/* Copy the key to internal storage.  Note that this has the 
+		   potential to leak a tiny amount of timing information about the
+		   key length, but given the mass of operations that follow this is
+		   unlikely to be significant */
 		memcpy( processedKey, key, keyLength );
 		*processedKeyLength = keyLength;
 		}
 
 	/* Perform the start of the inner hash using the zero-padded key XORed
-	   with the ipad value */
-	memset( hashBuffer, HMAC_IPAD, HMAC_DATASIZE );
-	for( i = 0; i < *processedKeyLength; i++ )
-		hashBuffer[ i ] ^= keyPtr[ i ];
+	   with the ipad value.  This could be done slightly more efficiently, 
+	   but the following sequence of operations minimises timing channels 
+	   leaking the key length */
+	memcpy( hashBuffer, keyPtr, *processedKeyLength );
+	if( *processedKeyLength < HMAC_DATASIZE )
+		{
+		memset( hashBuffer + *processedKeyLength, 0, 
+				HMAC_DATASIZE - *processedKeyLength );
+		}
+	for( i = 0; i < HMAC_DATASIZE; i++ )
+		hashBuffer[ i ] ^= HMAC_IPAD;
 	hashFunction( hashState, NULL, 0, hashBuffer, HMAC_DATASIZE, 
 				  HASH_STATE_START );
 	zeroise( hashBuffer, HMAC_DATASIZE );
@@ -88,7 +98,7 @@ static int prfInit( IN const HASHFUNCTION hashFunction,
 	}
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2, 4, 6 ) ) \
-static int prfEnd( IN const HASHFUNCTION hashFunction, 
+static int prfEnd( IN const HASH_FUNCTION hashFunction, 
 				   INOUT TYPECAST( HASHINFO ) void *hashState,
 				   IN_LENGTH_HASH const int hashSize, 
 				   OUT_BUFFER_FIXED( hashMaxSize ) void *hash, 
@@ -115,10 +125,17 @@ static int prfEnd( IN const HASHFUNCTION hashFunction,
 				  HASH_STATE_END );
 
 	/* Perform the outer hash using the zero-padded key XORed with the opad
-	   value followed by the digest from the inner hash */
-	memset( hashBuffer, HMAC_OPAD, HMAC_DATASIZE );
+	   value followed by the digest from the inner hash.  As with the init
+	   function this could be done slightly more efficiently, but the 
+	   following sequence of operations minimises timing channels leaking 
+	   the key length */
 	memcpy( hashBuffer, processedKey, processedKeyLength );
-	for( i = 0; i < processedKeyLength; i++ )
+	if( processedKeyLength < HMAC_DATASIZE )
+		{
+		memset( hashBuffer + processedKeyLength, 0, 
+				HMAC_DATASIZE - processedKeyLength );
+		}
+	for( i = 0; i < HMAC_DATASIZE; i++ )
 		hashBuffer[ i ] ^= HMAC_OPAD;
 	hashFunction( hashState, NULL, 0, hashBuffer, HMAC_DATASIZE, 
 				  HASH_STATE_START );
@@ -141,7 +158,7 @@ static int prfEnd( IN const HASHFUNCTION hashFunction,
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 3, 4, 6, 8 ) ) \
 static int pbkdf2Hash( OUT_BUFFER_FIXED( outLength ) BYTE *out, 
 					   IN_RANGE( 1, CRYPT_MAX_HASHSIZE ) const int outLength, 
-					   IN const HASHFUNCTION hashFunction, 
+					   IN const HASH_FUNCTION hashFunction, 
 					   INOUT TYPECAST( HASHINFO ) void *initialHashState,
 					   IN_LENGTH_HASH const int hashSize, 
 					   IN_BUFFER( keyLength ) const void *key, 
@@ -227,15 +244,13 @@ int derivePKCS5( STDC_UNUSED void *dummy,
 				 INOUT MECHANISM_DERIVE_INFO *mechanismInfo )
 	{
 	CRYPT_ALGO_TYPE hashAlgo;
-	HASHFUNCTION_ATOMIC hashFunctionAtomic;
-	HASHFUNCTION hashFunction;
+	HASH_FUNCTION_ATOMIC hashFunctionAtomic;
+	HASH_FUNCTION hashFunction;
 	HASHINFO initialHashInfo;
 	BYTE processedKey[ HMAC_DATASIZE + 8 ];
 	BYTE *dataOutPtr = mechanismInfo->dataOut;
 	static const MAP_TABLE mapTbl[] = {
-		{ CRYPT_ALGO_HMAC_MD5, CRYPT_ALGO_MD5 },
 		{ CRYPT_ALGO_HMAC_SHA1, CRYPT_ALGO_SHA1 },
-		{ CRYPT_ALGO_HMAC_RIPEMD160, CRYPT_ALGO_RIPEMD160 },
 		{ CRYPT_ALGO_HMAC_SHA2, CRYPT_ALGO_SHA2 },
 		{ CRYPT_ALGO_HMAC_SHAng, CRYPT_ALGO_SHAng },
 		{ CRYPT_ERROR, CRYPT_ERROR }, { CRYPT_ERROR, CRYPT_ERROR }
@@ -315,7 +330,7 @@ int kdfPKCS5( STDC_UNUSED void *dummy,
 	MESSAGE_DATA msgData;
 	BYTE masterSecretBuffer[ CRYPT_MAX_KEYSIZE + 8 ];
 	BYTE keyBuffer[ CRYPT_MAX_KEYSIZE + 8 ];
-	int masterSecretSize, keySize = DUMMY_INIT, status;
+	int masterSecretSize, keySize DUMMY_INIT, status;
 
 	UNUSED_ARG( dummy );
 	assert( isWritePtr( mechanismInfo, sizeof( MECHANISM_DERIVE_INFO ) ) );
@@ -535,7 +550,7 @@ CHECK_RETVAL STDC_NONNULL_ARG( ( 2 ) ) \
 int derivePKCS12( STDC_UNUSED void *dummy, 
 				  INOUT MECHANISM_DERIVE_INFO *mechanismInfo )
 	{
-	HASHFUNCTION_ATOMIC hashFunctionAtomic;
+	HASH_FUNCTION_ATOMIC hashFunctionAtomic;
 	BYTE p12_DSP[ P12_DSPSIZE + 8 ];
 	BYTE p12_Ai[ CRYPT_MAX_HASHSIZE + 8 ], p12_B[ P12_BLOCKSIZE + 8 ];
 	BYTE *dataOutPtr = mechanismInfo->dataOut;
@@ -625,8 +640,8 @@ int derivePKCS12( STDC_UNUSED void *dummy,
 
 typedef struct {
 	/* The hash functions and hash info */
-	HASHFUNCTION_ATOMIC hashFunctionAtomic;
-	HASHFUNCTION hashFunction;
+	HASH_FUNCTION_ATOMIC hashFunctionAtomic;
+	HASH_FUNCTION hashFunction;
 	int hashSize;
 
 	/* The initial hash state from prfInit() and the current hash state */
@@ -646,7 +661,7 @@ CHECK_RETVAL STDC_NONNULL_ARG( ( 2 ) ) \
 int deriveSSL( STDC_UNUSED void *dummy, 
 			   INOUT MECHANISM_DERIVE_INFO *mechanismInfo )
 	{
-	HASHFUNCTION md5HashFunction, shaHashFunction;
+	HASH_FUNCTION md5HashFunction, shaHashFunction;
 	HASHINFO hashInfo;
 	BYTE hash[ CRYPT_MAX_HASHSIZE + 8 ], counterData[ 16 + 8 ];
 	BYTE *dataOutPtr = mechanismInfo->dataOut;
@@ -743,7 +758,7 @@ static int tlsPrfInit( INOUT TLS_PRF_INFO *prfInfo,
 /* Implement one round of the TLS PRF */
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 3, 4 ) ) \
-static int tlsPrfHash( OUT_BUFFER_FIXED( outLength ) BYTE *out, 
+static int tlsPrfHash( INOUT_BUFFER_FIXED( outLength ) BYTE *out, 
 					   IN_LENGTH_SHORT const int outLength, 
 					   INOUT TLS_PRF_INFO *prfInfo, 
 					   IN_BUFFER( saltLength ) const void *salt, 
@@ -982,7 +997,7 @@ int deriveTLS12( STDC_UNUSED void *dummy,
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 3, 4, 6, 8, 10 ) ) \
 static int pgpPrfHash( OUT_BUFFER_FIXED( outLength ) BYTE *out, 
 					   IN_LENGTH_HASH const int outLength, 
-					   IN const HASHFUNCTION hashFunction, 
+					   IN const HASH_FUNCTION hashFunction, 
 					   INOUT TYPECAST( HASHINFO ) void *hashInfo,
 					   IN_LENGTH_HASH const int hashSize, 
 					   IN_BUFFER( keyLength ) const void *key, 
@@ -1058,7 +1073,7 @@ CHECK_RETVAL STDC_NONNULL_ARG( ( 2 ) ) \
 int derivePGP( STDC_UNUSED void *dummy, 
 			   INOUT MECHANISM_DERIVE_INFO *mechanismInfo )
 	{
-	HASHFUNCTION hashFunction;
+	HASH_FUNCTION hashFunction;
 	HASHINFO hashInfo;
 	long byteCount = ( long ) mechanismInfo->iterations << 6;
 	long secondByteCount = 0;
@@ -1068,13 +1083,15 @@ int derivePGP( STDC_UNUSED void *dummy,
 
 	REQUIRES( mechanismInfo->iterations >= 0 && \
 			  mechanismInfo->iterations <= MAX_KEYSETUP_HASHSPECIFIER );
-	REQUIRES( byteCount >= 0 && byteCount < MAX_INTLENGTH );
+	REQUIRES( byteCount >= 0 && byteCount < MAX_BUFFER_SIZE );
 
 	/* Clear return value */
 	memset( mechanismInfo->dataOut, 0, mechanismInfo->dataOutLength );
 
+	/* Set up the hash parameters */
 	getHashParameters( mechanismInfo->hashAlgo, 0, &hashFunction, 
 					   &hashSize );
+	memset( hashInfo, 0, sizeof( HASHINFO ) );
 
 	REQUIRES( mechanismInfo->dataOutLength < 2 * hashSize );
 
@@ -1163,8 +1180,8 @@ CHECK_RETVAL STDC_NONNULL_ARG( ( 2 ) ) \
 int deriveCMP( STDC_UNUSED void *dummy, 
 			   INOUT MECHANISM_DERIVE_INFO *mechanismInfo )
 	{
-	HASHFUNCTION_ATOMIC hashFunctionAtomic;
-	HASHFUNCTION hashFunction;
+	HASH_FUNCTION_ATOMIC hashFunctionAtomic;
+	HASH_FUNCTION hashFunction;
 	HASHINFO hashInfo;
 	int hashSize, iterations;
 

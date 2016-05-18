@@ -65,6 +65,7 @@ static int selfTest( void )
 	int i, status;
 
 	/* Test MD5 against the test vectors given in RFC 1320 */
+	memset( hashState, 0, HASH_STATE_SIZE );	/* Keep static analysers happy */
 	for( i = 0; digestValues[ i ].data != NULL; i++ )
 		{
 		status = testHash( capabilityInfo, hashState, digestValues[ i ].data, 
@@ -144,9 +145,13 @@ static int hash( CONTEXT_INFO *contextInfoPtr, BYTE *buffer, int noBytes )
 /* Internal API: Hash a single block of memory without the overhead of
    creating an encryption context */
 
-void md5HashBuffer( HASHINFO hashInfo, BYTE *outBuffer, 
-					const int outBufMaxLength, const void *inBuffer, 
-					const int inLength, const HASH_STATE hashState )
+STDC_NONNULL_ARG( ( 1 ) ) \
+void md5HashBuffer( INOUT_OPT HASHINFO hashInfo,
+					OUT_BUFFER_OPT_C( outBufMaxLength, 16 ) BYTE *outBuffer,
+					IN_LENGTH_SHORT_Z const int outBufMaxLength,
+					IN_BUFFER_OPT( inLength ) const void *inBuffer,
+					IN_LENGTH_SHORT_Z const int inLength,
+					IN_ENUM( HASH_STATE ) const HASH_STATE hashState )
 	{
 	MD5_CTX *md5Info = ( MD5_CTX * ) hashInfo;
 
@@ -183,8 +188,11 @@ void md5HashBuffer( HASHINFO hashInfo, BYTE *outBuffer,
 		}
 	}
 
-void md5HashBufferAtomic( BYTE *outBuffer, const int outBufMaxLength, 
-						  const void *inBuffer, const int inLength )
+STDC_NONNULL_ARG( ( 1, 3 ) ) \
+void md5HashBufferAtomic( OUT_BUFFER_C( outBufMaxLength, 16 ) BYTE *outBuffer,
+						  IN_LENGTH_SHORT_MIN( 16 ) const int outBufMaxLength,
+						  IN_BUFFER( inLength ) const void *inBuffer,
+						  IN_LENGTH_SHORT const int inLength )
 	{
 	MD5_CTX md5Info;
 

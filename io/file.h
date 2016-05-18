@@ -81,6 +81,17 @@
 
 /****************************************************************************
 *																			*
+*						 				AMX									*
+*																			*
+****************************************************************************/
+
+#elif defined( __SMX__ )
+
+#include <smx.h>
+#include <smxfs.h>
+
+/****************************************************************************
+*																			*
 *						 		ThreadX (via FileX)							*
 *																			*
 ****************************************************************************/
@@ -88,6 +99,16 @@
 #elif defined( __FileX__ )
 
 #include <fx_api.h>
+
+/****************************************************************************
+*																			*
+*						 			TI RTS									*
+*																			*
+****************************************************************************/
+
+#elif defined( __TI_COMPILER_VERSION__ )
+
+#include <errno.h>
 
 /****************************************************************************
 *																			*
@@ -112,10 +133,11 @@
 *																			*
 ****************************************************************************/
 
-#elif defined( __iOS__ ) || defined( __BEOS__ ) || defined( __ECOS__ ) || \
-	  defined( __MVS__ ) || defined( __RTEMS__ ) || \
-	  defined( __SYMBIAN32__ ) || defined( __TANDEM_NSK__ ) || \
-	  defined( __TANDEM_OSS__ ) || defined( __UNIX__ )
+#elif defined( __Android__ ) || defined( __BEOS__ ) || \
+	  defined( __ECOS__ ) || defined( __iOS__ ) || defined( __MVS__ ) || \
+	  defined( __RTEMS__ ) || defined( __SYMBIAN32__ ) || \
+	  defined( __TANDEM_NSK__ ) || defined( __TANDEM_OSS__ ) || \
+	  defined( __UNIX__ )
 
 #if defined( __TANDEM_NSK__ ) || defined( __TANDEM_OSS__ )
   /* Needed for lstat() in sys/lstat.h */
@@ -192,12 +214,13 @@
 *																			*
 ****************************************************************************/
 
-#elif defined( __VXWORKS__ )
+#elif defined( __VxWorks__ )
 
+#include <vxWorks.h>
 #include <ioLib.h>
 #include <errno.h>
 #include <ioctl.h>
-#include <vwModNum.h>
+#include <sys/stat.h>
 
 /****************************************************************************
 *																			*

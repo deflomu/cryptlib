@@ -139,14 +139,20 @@ int getKeysetAttributeS( INOUT KEYSET_INFO *keysetInfoPtr,
 		case CRYPT_IATTRIBUTE_USERINFO:
 		case CRYPT_IATTRIBUTE_TRUSTEDCERT:
 		case CRYPT_IATTRIBUTE_TRUSTEDCERT_NEXT:
+			{
+			const KEY_GETSPECIALITEM_FUNCTION getSpecialItemFunction = \
+						FNPTR_GET( keysetInfoPtr->getSpecialItemFunction );
+
 			REQUIRES( keysetInfoPtr->type == KEYSET_FILE && \
 					  keysetInfoPtr->subType == KEYSET_SUBTYPE_PKCS15 );
+			REQUIRES( getSpecialItemFunction != NULL );
 
 			/* It's encoded cryptlib-specific data, fetch it from to the
 			   keyset */
-			return( keysetInfoPtr->getSpecialItemFunction( keysetInfoPtr, 
-								attribute, msgData->data, msgData->length, 
-								&msgData->length ) );
+			return( getSpecialItemFunction( keysetInfoPtr, attribute, 
+											msgData->data, msgData->length, 
+											&msgData->length ) );
+			}
 
 		}
 
@@ -166,11 +172,15 @@ int setKeysetAttribute( INOUT KEYSET_INFO *keysetInfoPtr,
 						IN_INT_Z const int value, 
 						IN_ATTRIBUTE const CRYPT_ATTRIBUTE_TYPE attribute )
 	{
+	const KEY_SETSPECIALITEM_FUNCTION setSpecialItemFunction = \
+				FNPTR_GET( keysetInfoPtr->setSpecialItemFunction );
+
 	assert( isWritePtr( keysetInfoPtr, sizeof( KEYSET_INFO ) ) );
 
 	REQUIRES( value >= 0 && value < MAX_INTLENGTH );
 	REQUIRES( isAttribute( attribute ) || \
 			  isInternalAttribute( attribute ) );
+	REQUIRES( setSpecialItemFunction != NULL );
 
 	switch( attribute )
 		{
@@ -178,7 +188,7 @@ int setKeysetAttribute( INOUT KEYSET_INFO *keysetInfoPtr,
 			REQUIRES( keysetInfoPtr->type == KEYSET_FILE && \
 					  keysetInfoPtr->subType == KEYSET_SUBTYPE_PKCS15 );
 
-			return( keysetInfoPtr->setSpecialItemFunction( keysetInfoPtr,
+			return( setSpecialItemFunction( keysetInfoPtr, 
 											CRYPT_IATTRIBUTE_HWSTORAGE, 
 											&value, sizeof( int ) ) );
 		}
@@ -194,6 +204,8 @@ int setKeysetAttributeS( INOUT KEYSET_INFO *keysetInfoPtr,
 						 IN_LENGTH const int dataLength,
 						 IN_ATTRIBUTE const CRYPT_ATTRIBUTE_TYPE attribute )
 	{
+	const KEY_SETSPECIALITEM_FUNCTION setSpecialItemFunction = \
+				FNPTR_GET( keysetInfoPtr->setSpecialItemFunction );
 	int status;
 
 	assert( isWritePtr( keysetInfoPtr, sizeof( KEYSET_INFO ) ) );
@@ -202,25 +214,28 @@ int setKeysetAttributeS( INOUT KEYSET_INFO *keysetInfoPtr,
 	REQUIRES( dataLength > 0 && dataLength < MAX_INTLENGTH );
 	REQUIRES( isAttribute( attribute ) || \
 			  isInternalAttribute( attribute ) );
+	REQUIRES( setSpecialItemFunction != NULL );
 
 	switch( attribute )
 		{
 		case CRYPT_KEYINFO_QUERY:
 		case CRYPT_KEYINFO_QUERY_REQUESTS:
 			{
+			const KEY_ISBUSY_FUNCTION isBusyFunction = \
+						FNPTR_GET( keysetInfoPtr->isBusyFunction );
+
 			REQUIRES( keysetInfoPtr->type == KEYSET_DBMS );
-			REQUIRES( keysetInfoPtr->setSpecialItemFunction != NULL );
-			REQUIRES( keysetInfoPtr->isBusyFunction != NULL );
+			REQUIRES( isBusyFunction != NULL );
 
 			/* If we're in the middle of an existing query the user needs to
 			   cancel it before starting another one */
-			if( keysetInfoPtr->isBusyFunction( keysetInfoPtr ) && \
+			if( isBusyFunction( keysetInfoPtr ) && \
 				( dataLength != 6 || strCompare( data, "cancel", 6 ) ) )
 				return( exitErrorIncomplete( keysetInfoPtr, attribute ) );
 
 			/* Send the query to the data source */
-			return( keysetInfoPtr->setSpecialItemFunction( keysetInfoPtr, 
-											attribute, data, dataLength ) );
+			return( setSpecialItemFunction( keysetInfoPtr, attribute, data, 
+											dataLength ) );
 			}
 
 		case CRYPT_IATTRIBUTE_CONFIGDATA:
@@ -232,8 +247,8 @@ int setKeysetAttributeS( INOUT KEYSET_INFO *keysetInfoPtr,
 
 			/* It's encoded cryptlib-specific data, pass it through to the
 			   keyset */
-			status = keysetInfoPtr->setSpecialItemFunction( keysetInfoPtr,
-											attribute, data, dataLength );
+			status = setSpecialItemFunction( keysetInfoPtr, attribute, 
+											 data, dataLength );
 			if( cryptStatusOK( status ) && \
 				attribute != CRYPT_IATTRIBUTE_USERID )
 				{

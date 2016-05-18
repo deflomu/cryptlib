@@ -24,8 +24,8 @@
 /* Helper function used to access internal attributes within an attribute 
    group */
 
-#if 0	/* Currently unused, may be enabled in 3.4 with the move to 
-		   composite attributes for host/client information */
+#if 0	/* Currently unused, may be enabled in a later version with a move 
+		   to composite attributes for host/client information */
 
 /* Reset the internal virtual cursor in a attribute-list item after we've 
    moved the attribute cursor */
@@ -147,6 +147,8 @@ static const void *getAttrFunction( IN_OPT TYPECAST( ATTRIBUTE_LIST * ) \
 									IN_ENUM( ATTR ) const ATTR_TYPE attrGetType )
 	{
 	ATTRIBUTE_LIST *attributeListPtr = ( ATTRIBUTE_LIST * ) attributePtr;
+	ATTRACCESS_FUNCTION accessFunction = \
+					FNPTR_GET( attributeListPtr->accessFunction );
 	BOOLEAN subGroupMove;
 	int value, status;
 
@@ -185,10 +187,10 @@ static const void *getAttrFunction( IN_OPT TYPECAST( ATTRIBUTE_LIST * ) \
 		{
 		REQUIRES_N( attrGetType == ATTR_NEXT || attrGetType == ATTR_PREV );
 		REQUIRES_N( attributeListPtr->flags & ATTR_FLAG_COMPOSITE );
-		REQUIRES_N( attributeListPtr->accessFunction != NULL );
 
-		status = attributeListPtr->accessFunction( attributeListPtr, 
-												   attrGetType, &value );
+		accessFunction = FNPTR_GET( attributeListPtr->accessFunction );
+		REQUIRES_N( accessFunction != NULL );
+		status = accessFunction( attributeListPtr, attrGetType, &value );
 		if( cryptStatusError( status ) )
 			return( NULL );
 		subGroupMove = value;
@@ -223,8 +225,9 @@ static const void *getAttrFunction( IN_OPT TYPECAST( ATTRIBUTE_LIST * ) \
 		{
 		if( attributeListPtr->flags & ATTR_FLAG_COMPOSITE )
 			{
-			status = attributeListPtr->accessFunction( attributeListPtr, 
-													   ATTR_NONE, &value );
+			accessFunction = FNPTR_GET( attributeListPtr->accessFunction );
+			REQUIRES_N( accessFunction != NULL );
+			status = accessFunction( attributeListPtr, ATTR_NONE, &value );
 			if( cryptStatusError( status ) )
 				return( NULL );
 			*attributeID = value;
@@ -361,11 +364,14 @@ int getSessionAttributeCursor( IN_OPT ATTRIBUTE_LIST *attributeListHead,
 			*valuePtr = attributeListCursor->groupID;
 		else
 			{
+			const ATTRACCESS_FUNCTION accessFunction = \
+					FNPTR_GET( attributeListCursor->accessFunction );
 			int value, status;
 
+			REQUIRES( accessFunction != NULL );
+
 			/* It's a composite type, get the currently-selected sub-attribute */
-			status = attributeListCursor->accessFunction( attributeListCursor, 
-														  ATTR_NONE, &value );
+			status = accessFunction( attributeListCursor, ATTR_NONE, &value );
 			if( cryptStatusError( status ) )
 				return( status );
 			*valuePtr = value;
@@ -528,9 +534,9 @@ static int addInfo( INOUT_PTR ATTRIBUTE_LIST **listHeadPtr,
 					IN_ATTRIBUTE const CRYPT_ATTRIBUTE_TYPE attributeID,
 					IN_BUFFER_OPT( dataLength ) const void *data, 
 					IN_LENGTH_SHORT const int dataLength, 
-					IN_LENGTH_SHORT const int dataMaxLength, 
-					IN_OPT const ATTRACCESSFUNCTION accessFunction, 
-					IN_FLAGS( ATTR ) const int flags )
+					IN_LENGTH_SHORT_Z const int dataMaxLength, 
+					IN_OPT const ATTRACCESS_FUNCTION accessFunction, 
+					IN_FLAGS_Z( ATTR ) const int flags )
 	{
 	ATTRIBUTE_LIST *newElement, *insertPoint = NULL;
 
@@ -588,7 +594,7 @@ static int addInfo( INOUT_PTR ATTRIBUTE_LIST **listHeadPtr,
 	initVarStruct( newElement, ATTRIBUTE_LIST, dataMaxLength );
 	newElement->groupID = groupID;
 	newElement->attributeID = attributeID;
-	newElement->accessFunction = accessFunction;
+	FNPTR_SET( newElement->accessFunction, accessFunction );
 	newElement->flags = flags;
 	if( data == NULL )
 		newElement->intValue = dataLength;
@@ -645,7 +651,7 @@ int addSessionInfoEx( INOUT_PTR ATTRIBUTE_LIST **listHeadPtr,
 					  IN_ATTRIBUTE const CRYPT_ATTRIBUTE_TYPE attributeID,
 					  IN_BUFFER( dataLength ) const void *data, 
 					  IN_LENGTH_SHORT const int dataLength, 
-					  IN_FLAGS( ATTR ) const int flags )
+					  IN_FLAGS_Z( ATTR ) const int flags )
 	{
 	assert( isWritePtr( listHeadPtr, sizeof( ATTRIBUTE_LIST * ) ) );
 	assert( isReadPtr( data, dataLength ) );
@@ -665,7 +671,7 @@ assert( ( flags & ~( ATTR_FLAG_NONE | ATTR_FLAG_ENCODEDVALUE | ATTR_FLAG_MULTIVA
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 3, 4 ) ) \
 int addSessionInfoComposite( INOUT_PTR ATTRIBUTE_LIST **listHeadPtr,
 							 IN_ATTRIBUTE const CRYPT_ATTRIBUTE_TYPE attributeID,
-							 const ATTRACCESSFUNCTION accessFunction, 
+							 const ATTRACCESS_FUNCTION accessFunction, 
 							 IN_BUFFER( dataLength ) const void *data, 
 							 IN_LENGTH_SHORT const int dataLength,
 							 IN_FLAGS( ATTR ) const int flags )
@@ -699,7 +705,7 @@ int updateSessionInfo( INOUT_PTR ATTRIBUTE_LIST **listHeadPtr,
 					   IN_BUFFER( dataLength ) const void *data, 
 					   IN_LENGTH_SHORT const int dataLength,
 					   IN_LENGTH_SHORT const int dataMaxLength, 
-					   IN_FLAGS( ATTR ) const int flags )
+					   IN_FLAGS_Z( ATTR ) const int flags )
 	{
 	ATTRIBUTE_LIST *attributeListPtr = *listHeadPtr;
 

@@ -1,7 +1,7 @@
 /****************************************************************************
 *																			*
 *							cryptlib Session Scoreboard						*
-*						Copyright Peter Gutmann 1998-2011					*
+*						Copyright Peter Gutmann 1998-2014					*
 *																			*
 ****************************************************************************/
 
@@ -24,11 +24,12 @@
 #define SCOREBOARD_MIN_SIZE		8
 #define SCOREBOARD_MAX_SIZE		128
 
-/* The maximum size of any identifier and data value to be stored in the 
-   scoreboard.  Since the scoreboard is currently only used for SSL session
-   resumption, these are MAX_SESSIONID_SIZE, 32 bytes, and SSL_SECRET_SIZE, 
-   48 bytes */
+/* The minimum and maximum sizes of any identifiers and data values to be 
+   stored in the scoreboard.  Since the scoreboard is currently only used 
+   for SSL session resumption, these are MIN_SESSIONID_SIZE = 4 bytes, 
+   MAX_SESSIONID_SIZE = 32 bytes, and SSL_SECRET_SIZE = 48 bytes */
 
+#define SCOREBOARD_KEY_MIN		MIN_SESSIONID_SIZE
 #define SCOREBOARD_KEY_SIZE		MAX_SESSIONID_SIZE
 #define SCOREBOARD_DATA_SIZE	SSL_SECRET_SIZE
 
@@ -59,12 +60,14 @@ typedef struct {
 	int sessionIDlength;
 
 	/* The scoreboard data, just a pointer into the secure SCOREBOARD_DATA 
-	   memory.  The dataLength variable records how much data is actually
-	   present out of the SCOREBOARD_DATA_SIZE bytes that are available for
-	   use */
+	   memory, along with a word of metadata that can be used to convey
+	   additional information about the data.  The dataLength variable 
+	   records how much data is actually present out of the 
+	   SCOREBOARD_DATA_SIZE bytes that are available for use */
 	BUFFER( SCOREBOARD_DATA_SIZE, dataLength ) \
 	void *data;
 	int dataLength;
+	int metaData;
 
 	/* Miscellaneous information.  We record whether an entry corresponds to
 	   server or client data in order to provide logically separate 
@@ -95,7 +98,7 @@ typedef struct {
 	   same index value added, the uniqueID for the two will be different */
 	int lastEntry;				/* Last used entry in scoreboard */
 	int uniqueID;				/* Unique ID for scoreboard entry */
-	} SCOREBOARD_INFO;
+	} SCOREBOARD_INDEX_INFO;
 
 /****************************************************************************
 *																			*
@@ -106,18 +109,19 @@ typedef struct {
 /* Sanity-check the scoreboard state */
 
 CHECK_RETVAL_BOOL STDC_NONNULL_ARG( ( 1 ) ) \
-static BOOLEAN sanityCheck( const SCOREBOARD_INFO *scoreboardInfo )
+static BOOLEAN sanityCheck( const SCOREBOARD_INDEX_INFO *scoreboardIndexInfo )
 	{
-	assert( isReadPtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
+	assert( isReadPtr( scoreboardIndexInfo, 
+					   sizeof( SCOREBOARD_INDEX_INFO ) ) );
 
 	/* Make sure that the general state is in order */
-	if( scoreboardInfo->noEntries < SCOREBOARD_MIN_SIZE || \
-		scoreboardInfo->noEntries > SCOREBOARD_MAX_SIZE )
+	if( scoreboardIndexInfo->noEntries < SCOREBOARD_MIN_SIZE || \
+		scoreboardIndexInfo->noEntries > SCOREBOARD_MAX_SIZE )
 		return( FALSE );
-	if( scoreboardInfo->lastEntry < 0 || \
-		scoreboardInfo->lastEntry > scoreboardInfo->noEntries )
+	if( scoreboardIndexInfo->lastEntry < 0 || \
+		scoreboardIndexInfo->lastEntry > scoreboardIndexInfo->noEntries )
 		return( FALSE );
-	if( scoreboardInfo->uniqueID < 0 )
+	if( scoreboardIndexInfo->uniqueID < 0 )
 		return( FALSE );
 
 	return( TRUE );
@@ -139,7 +143,8 @@ static void clearScoreboardEntry( SCOREBOARD_INDEX *scoreboardEntryPtr )
 	zeroise( scoreboardEntryPtr->data, SCOREBOARD_DATA_SIZE );
 	memset( scoreboardEntryPtr, 0, sizeof( SCOREBOARD_INDEX ) );
 	scoreboardEntryPtr->data = savedDataPtr;
-	scoreboardEntryPtr->dataLength = 0;
+	scoreboardEntryPtr->dataLength = \
+			scoreboardEntryPtr->metaData = 0;
 	}
 
 /* Add a scoreboard entry */
@@ -152,8 +157,7 @@ static int addEntryData( INOUT SCOREBOARD_INDEX *scoreboardEntryPtr,
 						 IN_INT_Z const int altKeyCheckValue,
 						 IN_BUFFER_OPT( altKeyLength ) const void *altKey, 
 						 IN_LENGTH_SHORT_Z const int altKeyLength, 
-						 IN_BUFFER( valueLength ) const void *value, 
-						 IN_LENGTH_SHORT const int valueLength,
+						 const SCOREBOARD_INFO *scoreboardInfo,
 						 const time_t currentTime )
 	{
 	int status;
@@ -162,16 +166,17 @@ static int addEntryData( INOUT SCOREBOARD_INDEX *scoreboardEntryPtr,
 	assert( isReadPtr( key, keyLength ) );
 	assert( ( altKey == NULL && altKeyLength == 0 ) || \
 			isReadPtr( altKey, altKeyLength ) );
-	assert( isReadPtr( value, valueLength ) );
+	assert( isReadPtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
 
 	REQUIRES( keyCheckValue >= 0 );
-	REQUIRES( keyLength >= 8 && keyLength < MAX_INTLENGTH_SHORT );
+	REQUIRES( keyLength >= SCOREBOARD_KEY_MIN && \
+			  keyLength < MAX_INTLENGTH_SHORT );
 	REQUIRES( ( altKey == NULL && altKeyLength == 0 && \
 				altKeyCheckValue == 0 ) || \
 			  ( altKey != NULL && \
-				altKeyLength >= 2 && altKeyLength < MAX_INTLENGTH_SHORT && \
+				altKeyLength >= SCOREBOARD_KEY_MIN && \
+				altKeyLength < MAX_INTLENGTH_SHORT && \
 				altKeyCheckValue >= 0 ) );
-	REQUIRES( valueLength > 0 && valueLength <= SCOREBOARD_DATA_SIZE );
 	REQUIRES( currentTime > MIN_TIME_VALUE );
 
 	/* Clear the existing data in the entry */
@@ -196,8 +201,10 @@ static int addEntryData( INOUT SCOREBOARD_INDEX *scoreboardEntryPtr,
 	status = attributeCopyParams( scoreboardEntryPtr->data, 
 								  SCOREBOARD_DATA_SIZE, 
 								  &scoreboardEntryPtr->dataLength,
-								  value, valueLength );
+								  scoreboardInfo->data, 
+								  scoreboardInfo->dataSize );
 	ENSURES( cryptStatusOK( status ) );
+	scoreboardEntryPtr->metaData = scoreboardInfo->metaData;
 	scoreboardEntryPtr->isServerData = ( altKey == NULL ) ? TRUE : FALSE;
 	scoreboardEntryPtr->timeStamp = currentTime;
 
@@ -221,7 +228,7 @@ static int addEntryData( INOUT SCOREBOARD_INDEX *scoreboardEntryPtr,
    scoreboard LRU management */
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 3, 6 ) ) \
-static int findEntry( INOUT SCOREBOARD_INFO *scoreboardInfo,
+static int findEntry( INOUT SCOREBOARD_INDEX_INFO *scoreboardIndexInfo,
 					  IN_ENUM( SCOREBOARD_KEY ) \
 							const SCOREBOARD_KEY_TYPE keyType,
 					  IN_BUFFER( keyLength ) const void *key, 
@@ -229,7 +236,7 @@ static int findEntry( INOUT SCOREBOARD_INFO *scoreboardInfo,
 					  const time_t currentTime, 
 					  OUT_INT_SHORT_Z int *position )
 	{
-	SCOREBOARD_INDEX *scoreboardIndex = scoreboardInfo->index;
+	SCOREBOARD_INDEX *scoreboardIndex = scoreboardIndexInfo->index;
 	BYTE hashValue[ HASH_DATA_SIZE + 8 ];
 	const BOOLEAN keyIsSessionID = \
 		( keyType == SCOREBOARD_KEY_SESSIONID_CLI || \
@@ -242,15 +249,18 @@ static int findEntry( INOUT SCOREBOARD_INFO *scoreboardInfo,
 	int nextFreeEntry = CRYPT_ERROR, lastUsedEntry = 0, oldestEntry = 0;
 	int matchPosition = CRYPT_ERROR, i;
 
-	assert( isWritePtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
+	assert( isWritePtr( scoreboardIndexInfo, 
+						sizeof( SCOREBOARD_INDEX_INFO ) ) );
 	assert( isReadPtr( key, keyLength ) );
 	assert( isWritePtr( position, sizeof( int ) ) );
 	assert( isWritePtr( scoreboardIndex,
-						scoreboardInfo->noEntries * sizeof( SCOREBOARD_INDEX ) ) );
+						scoreboardIndexInfo->noEntries * \
+								sizeof( SCOREBOARD_INDEX ) ) );
 
 	REQUIRES( keyType > SCOREBOARD_KEY_NONE && \
 			  keyType < SCOREBOARD_KEY_LAST );
-	REQUIRES( keyLength >= 2 && keyLength < MAX_INTLENGTH_SHORT);
+	REQUIRES( keyLength >= SCOREBOARD_KEY_MIN && \
+			  keyLength < MAX_INTLENGTH_SHORT);
 	REQUIRES( currentTime > MIN_TIME_VALUE );
 
 	/* Clear return value */
@@ -260,7 +270,7 @@ static int findEntry( INOUT SCOREBOARD_INFO *scoreboardInfo,
 	   (indicated by matchPosition), and keeping a record of the oldest 
 	   entry (recorded by oldestEntry) in case we need to expire an entry to
 	   make room for a new one */
-	for( i = 0; i < scoreboardInfo->lastEntry && \
+	for( i = 0; i < scoreboardIndexInfo->lastEntry && \
 				i < FAILSAFE_ITERATIONS_MAX; i++ )
 		{
 		SCOREBOARD_INDEX *scoreboardEntryPtr = &scoreboardIndex[ i ];
@@ -329,8 +339,8 @@ static int findEntry( INOUT SCOREBOARD_INFO *scoreboardInfo,
 
 	/* If the total number of entries has shrunk due to old entries expiring,
 	   reduce the overall scoreboard-used size */
-	if( lastUsedEntry + 1 < scoreboardInfo->lastEntry )
-		scoreboardInfo->lastEntry = lastUsedEntry + 1;
+	if( lastUsedEntry + 1 < scoreboardIndexInfo->lastEntry )
+		scoreboardIndexInfo->lastEntry = lastUsedEntry + 1;
 
 	/* If we've found a match, we're done */
 	if( matchPosition >= 0 )
@@ -351,15 +361,15 @@ static int findEntry( INOUT SCOREBOARD_INFO *scoreboardInfo,
 		{
 		/* If there are still free positions in the scoreboard, use the next
 		   available one */
-		if( scoreboardInfo->lastEntry < scoreboardInfo->noEntries )
-			*position = scoreboardInfo->lastEntry;
+		if( scoreboardIndexInfo->lastEntry < scoreboardIndexInfo->noEntries )
+			*position = scoreboardIndexInfo->lastEntry;
 		else
 			{
 			/* There are no free positions, overwrite the oldest entry */
 			*position = oldestEntry;
 			}
 		}
-	ENSURES( *position >= 0 && *position < scoreboardInfo->noEntries );
+	ENSURES( *position >= 0 && *position < scoreboardIndexInfo->noEntries );
 
 	/* Let the caller know that this is an indication of a free position 
 	   rather than a match */
@@ -418,67 +428,75 @@ static int findEntry( INOUT SCOREBOARD_INFO *scoreboardInfo,
    two threads simultaneously connect to the same server, with FQDNs the 
    same but session IDs different */
 
-CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2, 6, 8 ) ) \
-static int addEntry( INOUT SCOREBOARD_INFO *scoreboardInfo, 
+CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2, 6, 7 ) ) \
+static int addEntry( INOUT SCOREBOARD_INDEX_INFO *scoreboardIndexInfo, 
 					 IN_BUFFER( keyLength ) const void *key, 
 					 IN_LENGTH_SHORT_MIN( 8 ) const int keyLength, 
 					 IN_BUFFER_OPT( altKeyLength ) const void *altKey, 
 					 IN_LENGTH_SHORT_Z const int altKeyLength, 
-					 IN_BUFFER( valueLength ) const void *value, 
-					 IN_LENGTH_SHORT const int valueLength,
-					 OUT_INT_Z int *uniqueID )
+					 const SCOREBOARD_INFO *scoreboardInfo,
+					 OUT int *uniqueID )
 	{
-	SCOREBOARD_INDEX *scoreboardIndex = scoreboardInfo->index;
+	SCOREBOARD_INDEX *scoreboardIndex = scoreboardIndexInfo->index;
 	SCOREBOARD_INDEX *scoreboardEntryPtr = NULL;
 	const time_t currentTime = getTime();
 	const BOOLEAN isClient = ( altKey != NULL ) ? TRUE : FALSE;
 	const int checkValue = checksumData( key, keyLength );
-	int altCheckValue = 0, altPosition = DUMMY_INIT;
+	int altCheckValue = 0, altPosition DUMMY_INIT;
 	int position, altStatus = CRYPT_ERROR, status;
 
-	assert( isWritePtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
+	assert( isWritePtr( scoreboardIndexInfo, 
+						sizeof( SCOREBOARD_INDEX_INFO ) ) );
 	assert( isReadPtr( key, keyLength ) );
 	assert( ( altKey == NULL && altKeyLength == 0 ) || \
 			isReadPtr( altKey, altKeyLength ) );
-	assert( isReadPtr( value, valueLength ) );
+	assert( isReadPtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
 	assert( isWritePtr( uniqueID, sizeof( int ) ) );
 	assert( isWritePtr( scoreboardIndex,
-						scoreboardInfo->noEntries * sizeof( SCOREBOARD_INDEX ) ) );
+						scoreboardIndexInfo->noEntries * \
+								sizeof( SCOREBOARD_INDEX ) ) );
 
-	REQUIRES( keyLength >= 8 && keyLength < MAX_INTLENGTH_SHORT );
+	REQUIRES( keyLength >= SCOREBOARD_KEY_MIN && \
+			  keyLength < MAX_INTLENGTH_SHORT );
 	REQUIRES( ( altKey == NULL && altKeyLength == 0 ) || \
 			  ( altKey != NULL && \
-				altKeyLength >= 2 && altKeyLength < MAX_INTLENGTH_SHORT ) );
-	REQUIRES( valueLength > 0 && valueLength <= SCOREBOARD_DATA_SIZE );
+				altKeyLength >= SCOREBOARD_KEY_MIN && \
+				altKeyLength < MAX_INTLENGTH_SHORT ) );
 
-	REQUIRES( sanityCheck( scoreboardInfo ) );
+	REQUIRES( sanityCheck( scoreboardIndexInfo ) );
 
 	/* Clear return value */
 	*uniqueID = CRYPT_ERROR;
 
+	/* Make sure that the checksum was calculated OK */
+	if( cryptStatusError( checkValue ) )
+		return( checkValue );
+	
 	/* If there's something wrong with the time then we can't perform (time-
 	   based) scoreboard management */
 	if( currentTime <= MIN_TIME_VALUE )
 		return( CRYPT_ERROR_NOTFOUND );
-	
+
 	/* Try and find this entry in the scoreboard */
-	status = findEntry( scoreboardInfo, isClient ? \
+	status = findEntry( scoreboardIndexInfo, isClient ? \
 							SCOREBOARD_KEY_SESSIONID_CLI : \
 							SCOREBOARD_KEY_SESSIONID_SVR, 
 						key, keyLength, currentTime, &position );
 	if( cryptStatusError( status ) && status != OK_SPECIAL )
 		return( status );
-	ENSURES( position >= 0 && position < scoreboardInfo->noEntries );
+	ENSURES( position >= 0 && position < scoreboardIndexInfo->noEntries );
 	if( altKey != NULL )
 		{
 		altCheckValue = checksumData( altKey, altKeyLength );
-		altStatus = findEntry( scoreboardInfo, SCOREBOARD_KEY_FQDN, 
+		if( cryptStatusError( altCheckValue ) )
+			return( altCheckValue );
+		altStatus = findEntry( scoreboardIndexInfo, SCOREBOARD_KEY_FQDN, 
 							   altKey, altKeyLength, currentTime, 
 							   &altPosition );
 		if( cryptStatusError( altStatus ) && altStatus != OK_SPECIAL )
 			return( altStatus );
 		ENSURES( altPosition >= 0 && \
-				 altPosition < scoreboardInfo->noEntries );
+				 altPosition < scoreboardIndexInfo->noEntries );
 		}
 	ENSURES( cryptStatusOK( status ) || status == OK_SPECIAL );
 	ENSURES( altKey == NULL || \
@@ -517,8 +535,9 @@ static int addEntry( INOUT SCOREBOARD_INFO *scoreboardInfo,
 		ENSURES( altKey == NULL || ( cryptStatusOK( altStatus ) && \
 									 position == altPosition ) );
 		scoreboardEntryPtr = &scoreboardIndex[ position ];
-		if( scoreboardEntryPtr->dataLength != valueLength || \
-			memcmp( scoreboardEntryPtr->data, value, valueLength ) )
+		if( scoreboardEntryPtr->dataLength != scoreboardInfo->dataSize || \
+			memcmp( scoreboardEntryPtr->data, scoreboardInfo->data, \
+					scoreboardInfo->dataSize ) )
 			{
 			/* The search keys match but the data doesn't, something funny 
 			   is going on */
@@ -551,18 +570,18 @@ static int addEntry( INOUT SCOREBOARD_INFO *scoreboardInfo,
 
 	/* Add the data to the new scoreboard entry position */
 	status = addEntryData( scoreboardEntryPtr, checkValue, key, keyLength, 
-						   altCheckValue, altKey, altKeyLength, value, 
-						   valueLength, currentTime );
+						   altCheckValue, altKey, altKeyLength, 
+						   scoreboardInfo, currentTime );
 	if( cryptStatusError( status ) )
 		{
 		clearScoreboardEntry( scoreboardEntryPtr );
 		return( status );
 		}
-	*uniqueID = scoreboardEntryPtr->uniqueID = scoreboardInfo->uniqueID++;
+	*uniqueID = scoreboardEntryPtr->uniqueID = scoreboardIndexInfo->uniqueID++;
 
 	/* If we've used a new entry, update the position-used index */
-	if( position >= scoreboardInfo->lastEntry )
-		scoreboardInfo->lastEntry = position + 1;
+	if( position >= scoreboardIndexInfo->lastEntry )
+		scoreboardIndexInfo->lastEntry = position + 1;
 
 	return( CRYPT_OK );
 	}
@@ -570,33 +589,36 @@ static int addEntry( INOUT SCOREBOARD_INFO *scoreboardInfo,
 /* Look up data in the scoreboard */
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 3, 5, 6 ) ) \
-static int lookupScoreboard( INOUT SCOREBOARD_INFO *scoreboardInfo,
+static int lookupScoreboard( INOUT SCOREBOARD_INDEX_INFO *scoreboardIndexInfo,
 							 IN_ENUM( SCOREBOARD_KEY ) \
 								const SCOREBOARD_KEY_TYPE keyType,
 							 IN_BUFFER( keyLength ) const void *key, 
 							 IN_LENGTH_SHORT_MIN( 8 ) const int keyLength, 
-						     OUT SCOREBOARD_LOOKUP_RESULT *lookupResult,
+						     OUT SCOREBOARD_INFO *scoreboardInfo,
 							 OUT_INT_Z int *uniqueID )
 	{
-	SCOREBOARD_INDEX *scoreboardIndex = scoreboardInfo->index;
+	SCOREBOARD_INDEX *scoreboardIndex = scoreboardIndexInfo->index;
 	SCOREBOARD_INDEX *scoreboardEntryPtr;
 	const time_t currentTime = getTime();
 	int position, status;
 
-	assert( isWritePtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
+	assert( isWritePtr( scoreboardIndexInfo, 
+						sizeof( SCOREBOARD_INDEX_INFO ) ) );
 	assert( isReadPtr( key, keyLength ) );
-	assert( isWritePtr( lookupResult, sizeof( SCOREBOARD_LOOKUP_RESULT ) ) );
+	assert( isWritePtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
 	assert( isWritePtr( uniqueID, sizeof( int ) ) );
 	assert( isWritePtr( scoreboardIndex,
-						scoreboardInfo->noEntries * sizeof( SCOREBOARD_INDEX ) ) );
+						scoreboardIndexInfo->noEntries * \
+								sizeof( SCOREBOARD_INDEX ) ) );
 
 	REQUIRES( keyType > SCOREBOARD_KEY_NONE && \
 			  keyType < SCOREBOARD_KEY_LAST );
-	REQUIRES( keyLength >= 8 && keyLength < MAX_INTLENGTH_SHORT );
-	REQUIRES( sanityCheck( scoreboardInfo ) );
+	REQUIRES( keyLength >= SCOREBOARD_KEY_MIN && \
+			  keyLength < MAX_INTLENGTH_SHORT );
+	REQUIRES( sanityCheck( scoreboardIndexInfo ) );
 
 	/* Clear return values */
-	memset( lookupResult, 0, sizeof( SCOREBOARD_LOOKUP_RESULT ) );
+	memset( scoreboardInfo, 0, sizeof( SCOREBOARD_INFO ) );
 	*uniqueID = CRYPT_ERROR;
 
 	/* If there's something wrong with the time then we can't perform (time-
@@ -605,7 +627,7 @@ static int lookupScoreboard( INOUT SCOREBOARD_INFO *scoreboardInfo,
 		return( CRYPT_ERROR_NOTFOUND );
 
 	/* Try and find this entry in the scoreboard */
-	status = findEntry( scoreboardInfo, keyType, key, keyLength, 
+	status = findEntry( scoreboardIndexInfo, keyType, key, keyLength, 
 						currentTime, &position );
 	if( cryptStatusError( status ) )
 		{
@@ -614,21 +636,22 @@ static int lookupScoreboard( INOUT SCOREBOARD_INFO *scoreboardInfo,
 		   anything else is an error */
 		return( ( status == OK_SPECIAL ) ? CRYPT_ERROR_NOTFOUND : status );
 		}
-	ENSURES( position >= 0 && position < scoreboardInfo->noEntries );
+	ENSURES( position >= 0 && position < scoreboardIndexInfo->noEntries );
 	scoreboardEntryPtr = &scoreboardIndex[ position ];
 
 	/* We've found a match, return a pointer to the data (which avoids 
 	   copying it out of secure memory) and the unique ID for it */
-	lookupResult->key = scoreboardEntryPtr->sessionID;
-	lookupResult->keySize = scoreboardEntryPtr->sessionIDlength;
-	lookupResult->data = scoreboardEntryPtr->data;
-	lookupResult->dataSize = scoreboardEntryPtr->dataLength;
+	scoreboardInfo->key = scoreboardEntryPtr->sessionID;
+	scoreboardInfo->keySize = scoreboardEntryPtr->sessionIDlength;
+	scoreboardInfo->data = scoreboardEntryPtr->data;
+	scoreboardInfo->dataSize = scoreboardEntryPtr->dataLength;
+	scoreboardInfo->metaData = scoreboardEntryPtr->metaData;
 	*uniqueID = scoreboardEntryPtr->uniqueID;
 
 	/* Update the entry's last-access date */
 	scoreboardEntryPtr->timeStamp = currentTime;
 
-	ENSURES( sanityCheck( scoreboardInfo ) );
+	ENSURES( sanityCheck( scoreboardIndexInfo ) );
 
 	return( CRYPT_OK );
 	}
@@ -642,108 +665,111 @@ static int lookupScoreboard( INOUT SCOREBOARD_INFO *scoreboardInfo,
 /* Add and delete entries to/from the scoreboard.  These are just wrappers
    for the local scoreboard-access function, for use by external code */
 
-CHECK_RETVAL_RANGE( 0, MAX_INTLENGTH ) CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 3, 5 ) ) \
-int lookupScoreboardEntry( INOUT TYPECAST( SCOREBOARD_INFO * ) \
-								void *scoreboardInfoPtr,
+CHECK_RETVAL_RANGE( 0, MAX_INTLENGTH ) STDC_NONNULL_ARG( ( 1, 3, 5 ) ) \
+int lookupScoreboardEntry( INOUT TYPECAST( SCOREBOARD_INDEX_INFO * ) \
+								void *scoreboardIndexInfoPtr,
 						   IN_ENUM( SCOREBOARD_KEY ) \
 								const SCOREBOARD_KEY_TYPE keyType,
 						   IN_BUFFER( keyLength ) const void *key, 
 						   IN_LENGTH_SHORT_MIN( 2 ) const int keyLength, 
-						   OUT SCOREBOARD_LOOKUP_RESULT *lookupResult )
+						   OUT SCOREBOARD_INFO *scoreboardInfo )
 	{
-	SCOREBOARD_INFO *scoreboardInfo = scoreboardInfoPtr;
+	SCOREBOARD_INDEX_INFO *scoreboardIndexInfo = scoreboardIndexInfoPtr;
 	int uniqueID, status;
 
-	assert( isWritePtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
+	assert( isWritePtr( scoreboardIndexInfo, 
+						sizeof( SCOREBOARD_INDEX_INFO ) ) );
 	assert( isReadPtr( key, keyLength ) );
-	assert( isWritePtr( lookupResult, sizeof( SCOREBOARD_LOOKUP_RESULT ) ) );
+	assert( isWritePtr( scoreboardInfo, 
+						sizeof( SCOREBOARD_INFO ) ) );
 
 	REQUIRES( keyType > SCOREBOARD_KEY_NONE && \
 			  keyType < SCOREBOARD_KEY_LAST );
-	REQUIRES( keyLength >= 2 && keyLength < MAX_INTLENGTH_SHORT );
+	REQUIRES( keyLength >= SCOREBOARD_KEY_MIN && \
+			  keyLength < MAX_INTLENGTH_SHORT );
 
 	/* Clear return values */
-	memset( lookupResult, 0, sizeof( SCOREBOARD_LOOKUP_RESULT ) );
+	memset( scoreboardInfo, 0, sizeof( SCOREBOARD_INFO ) );
 
 	status = krnlEnterMutex( MUTEX_SCOREBOARD );
 	if( cryptStatusError( status ) )
 		return( status );
-	status = lookupScoreboard( scoreboardInfo, keyType, key, keyLength, 
-							   lookupResult, &uniqueID );
+	status = lookupScoreboard( scoreboardIndexInfo, keyType, key, keyLength, 
+							   scoreboardInfo, &uniqueID );
 	krnlExitMutex( MUTEX_SCOREBOARD );
 	return( cryptStatusError( status ) ? status : uniqueID );
 	}
 
 CHECK_RETVAL_RANGE( 0, MAX_INTLENGTH ) STDC_NONNULL_ARG( ( 1, 2, 4 ) ) \
-int addScoreboardEntry( INOUT TYPECAST( SCOREBOARD_INFO * ) \
-							void *scoreboardInfoPtr,
+int addScoreboardEntry( INOUT void *scoreboardIndexInfoPtr,
 						IN_BUFFER( keyLength ) const void *key, 
 						IN_LENGTH_SHORT_MIN( 8 ) const int keyLength, 
-						IN_BUFFER( valueLength ) const void *value, 
-						IN_LENGTH_SHORT const int valueLength )
+						const SCOREBOARD_INFO *scoreboardInfo )
 	{
-	SCOREBOARD_INFO *scoreboardInfo = scoreboardInfoPtr;
+	SCOREBOARD_INDEX_INFO *scoreboardIndexInfo = scoreboardIndexInfoPtr;
 	int uniqueID, status;
 
-	assert( isWritePtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
+	assert( isWritePtr( scoreboardIndexInfo, 
+						sizeof( SCOREBOARD_INDEX_INFO ) ) );
 	assert( isReadPtr( key, keyLength ) );
-	assert( isReadPtr( value, valueLength ) );
+	assert( isReadPtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
 
-	REQUIRES( keyLength >= 8 && keyLength < MAX_INTLENGTH_SHORT );
-	REQUIRES( valueLength > 0 && valueLength <= SCOREBOARD_DATA_SIZE );
+	REQUIRES( keyLength >= SCOREBOARD_KEY_MIN && \
+			  keyLength < MAX_INTLENGTH_SHORT );
 
 	/* Add the entry to the scoreboard */
 	status = krnlEnterMutex( MUTEX_SCOREBOARD );
 	if( cryptStatusError( status ) )
 		return( status );
-	status = addEntry( scoreboardInfo, key, keyLength, NULL, 0,
-					   ( void * ) value, valueLength, &uniqueID );
+	status = addEntry( scoreboardIndexInfo, key, keyLength, NULL, 0,
+					   scoreboardInfo, &uniqueID );
 	krnlExitMutex( MUTEX_SCOREBOARD );
 	return( cryptStatusError( status ) ? status : uniqueID );
 	}
 
 CHECK_RETVAL_RANGE( 0, MAX_INTLENGTH ) STDC_NONNULL_ARG( ( 1, 2, 4, 6 ) ) \
-int addScoreboardEntryEx( INOUT TYPECAST( SCOREBOARD_INFO * ) \
-								void *scoreboardInfoPtr,
+int addScoreboardEntryEx( INOUT void *scoreboardIndexInfoPtr,
 						  IN_BUFFER( keyLength ) const void *key, 
 						  IN_LENGTH_SHORT_MIN( 8 ) const int keyLength, 
 						  IN_BUFFER( keyLength ) const void *altKey, 
 						  IN_LENGTH_SHORT_MIN( 2 ) const int altKeyLength, 
-						  IN_BUFFER( valueLength ) const void *value, 
-						  IN_LENGTH_SHORT const int valueLength )
+						  const SCOREBOARD_INFO *scoreboardInfo )
 	{
-	SCOREBOARD_INFO *scoreboardInfo = scoreboardInfoPtr;
+	SCOREBOARD_INDEX_INFO *scoreboardIndexInfo = scoreboardIndexInfoPtr;
 	int uniqueID, status;
 
-	assert( isWritePtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
+	assert( isWritePtr( scoreboardIndexInfo, 
+						sizeof( SCOREBOARD_INDEX_INFO ) ) );
 	assert( isReadPtr( key, keyLength ) );
 	assert( isReadPtr( altKey, altKeyLength ) );
-	assert( isReadPtr( value, valueLength ) );
+	assert( isReadPtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
 
-	REQUIRES( keyLength >= 8 && keyLength < MAX_INTLENGTH_SHORT );
-	REQUIRES( altKeyLength >= 2 && altKeyLength < MAX_INTLENGTH_SHORT );
-	REQUIRES( valueLength > 0 && valueLength <= SCOREBOARD_DATA_SIZE );
+	REQUIRES( keyLength >= SCOREBOARD_KEY_MIN && \
+			  keyLength < MAX_INTLENGTH_SHORT );
+	REQUIRES( altKeyLength >= SCOREBOARD_KEY_MIN && \
+			  altKeyLength < MAX_INTLENGTH_SHORT );
 
 	/* Add the entry to the scoreboard */
 	status = krnlEnterMutex( MUTEX_SCOREBOARD );
 	if( cryptStatusError( status ) )
 		return( status );
-	status = addEntry( scoreboardInfo, key, keyLength, altKey, altKeyLength,
-					   ( void * ) value, valueLength, &uniqueID );
+	status = addEntry( scoreboardIndexInfo, key, keyLength, altKey, 
+					   altKeyLength, scoreboardInfo, &uniqueID );
 	krnlExitMutex( MUTEX_SCOREBOARD );
 	return( cryptStatusError( status ) ? status : uniqueID );
 	}
 
 STDC_NONNULL_ARG( ( 1 ) ) \
-void deleteScoreboardEntry( INOUT TYPECAST( SCOREBOARD_INFO * ) \
-								void *scoreboardInfoPtr, 
+void deleteScoreboardEntry( INOUT TYPECAST( SCOREBOARD_INDEX_INFO * ) \
+								void *scoreboardIndexInfoPtr, 
 							IN_INT_Z const int uniqueID )
 	{
-	SCOREBOARD_INFO *scoreboardInfo = scoreboardInfoPtr;
-	SCOREBOARD_INDEX *scoreboardIndex = scoreboardInfo->index;
+	SCOREBOARD_INDEX_INFO *scoreboardIndexInfo = scoreboardIndexInfoPtr;
+	SCOREBOARD_INDEX *scoreboardIndex = scoreboardIndexInfo->index;
 	int lastUsedEntry = -1, i, status;
 
-	assert( isWritePtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
+	assert( isWritePtr( scoreboardIndexInfo, 
+						sizeof( SCOREBOARD_INDEX_INFO ) ) );
 	
 	REQUIRES_V( uniqueID >= 0 && \
 				uniqueID < MAX_INTLENGTH );
@@ -753,7 +779,7 @@ void deleteScoreboardEntry( INOUT TYPECAST( SCOREBOARD_INFO * ) \
 		return;
 
 	/* Search the scoreboard for the entry with the given ID */
-	for( i = 0; i < scoreboardInfo->lastEntry && \
+	for( i = 0; i < scoreboardIndexInfo->lastEntry && \
 				i < FAILSAFE_ITERATIONS_MAX; i++ )
 		{
 		SCOREBOARD_INDEX *scoreboardEntryPtr = &scoreboardIndex[ i ];
@@ -777,7 +803,7 @@ void deleteScoreboardEntry( INOUT TYPECAST( SCOREBOARD_INFO * ) \
 
 	/* Since we may have deleted entries at the end of the scoreboard, we 
 	   can reduce the lastEntry value to the highest remaining entry */
-	scoreboardInfo->lastEntry = lastUsedEntry + 1;
+	scoreboardIndexInfo->lastEntry = lastUsedEntry + 1;
 
 	krnlExitMutex( MUTEX_SCOREBOARD );
 	}
@@ -791,41 +817,49 @@ void deleteScoreboardEntry( INOUT TYPECAST( SCOREBOARD_INFO * ) \
 /* Perform a self-test of the scoreboard functions */
 
 CHECK_RETVAL_BOOL STDC_NONNULL_ARG( ( 1 ) ) \
-static BOOLEAN selfTest( INOUT SCOREBOARD_INFO *scoreboardInfo )
+static BOOLEAN selfTest( INOUT SCOREBOARD_INDEX_INFO *scoreboardIndexInfo )
 	{
-	SCOREBOARD_LOOKUP_RESULT lookupResult;
-	int uniqueID1, uniqueID2, foundUniqueID;
+	SCOREBOARD_INFO scoreboardInfo;
+	int uniqueID1, uniqueID2, foundUniqueID, status;
 
-	assert( isWritePtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
-	 
-	uniqueID1 = addScoreboardEntry( scoreboardInfo, "test key 1", 10,
-									"test value 1", 12 );
-	if( cryptStatusError( uniqueID1 ) )
+	assert( isWritePtr( scoreboardIndexInfo, 
+						sizeof( SCOREBOARD_INDEX_INFO ) ) );
+
+	memset( &scoreboardInfo, 0, sizeof( SCOREBOARD_INFO ) );
+	scoreboardInfo.data = "test value 1";
+	scoreboardInfo.dataSize = 12;
+	status = uniqueID1 = \
+		addScoreboardEntry( scoreboardIndexInfo, "test key 1", 10,
+							&scoreboardInfo );
+	if( cryptStatusError( status ) )
 		return( FALSE );
-	uniqueID2 = addScoreboardEntry( scoreboardInfo, "test key 2", 10,
-									"test value 2", 12 );
-	if( cryptStatusError( uniqueID2 ) )
+	scoreboardInfo.data = "test value 2";
+	scoreboardInfo.dataSize = 12;
+	status = uniqueID2 = \
+		addScoreboardEntry( scoreboardIndexInfo, "test key 2", 10,
+							&scoreboardInfo );
+	if( cryptStatusError( status ) )
 		return( FALSE );
-	foundUniqueID = lookupScoreboardEntry( scoreboardInfo, 
-							SCOREBOARD_KEY_SESSIONID_SVR, "test key 1", 10,
-							&lookupResult );
-	if( cryptStatusError( foundUniqueID ) )
+	status = foundUniqueID = \
+		lookupScoreboardEntry( scoreboardIndexInfo, SCOREBOARD_KEY_SESSIONID_SVR, 
+							   "test key 1", 10, &scoreboardInfo );
+	if( cryptStatusError( status ) )
 		return( FALSE );
 	if( foundUniqueID != uniqueID1 || \
-		lookupResult.keySize != 10 || \
-		memcmp( lookupResult.key, "test key 1", 10 ) || \
-		lookupResult.dataSize != 12 || \
-		memcmp( lookupResult.data, "test value 1", 12 ) )
+		scoreboardInfo.keySize != 10 || \
+		memcmp( scoreboardInfo.key, "test key 1", 10 ) || \
+		scoreboardInfo.dataSize != 12 || \
+		memcmp( scoreboardInfo.data, "test value 1", 12 ) )
 		return( FALSE );
-	deleteScoreboardEntry( scoreboardInfo, uniqueID1 );
-	foundUniqueID = lookupScoreboardEntry( scoreboardInfo, 
+	deleteScoreboardEntry( scoreboardIndexInfo, uniqueID1 );
+	foundUniqueID = lookupScoreboardEntry( scoreboardIndexInfo, 
 							SCOREBOARD_KEY_SESSIONID_SVR, "test key 1", 10,
-							&lookupResult );
+							&scoreboardInfo );
 	if( foundUniqueID != CRYPT_ERROR_NOTFOUND )
 		return( FALSE );
-	deleteScoreboardEntry( scoreboardInfo, uniqueID2 );
-	if( scoreboardInfo->lastEntry != 0 || \
-		scoreboardInfo->uniqueID != 2 )
+	deleteScoreboardEntry( scoreboardIndexInfo, uniqueID2 );
+	if( scoreboardIndexInfo->lastEntry != 0 || \
+		scoreboardIndexInfo->uniqueID != 2 )
 		return( FALSE );
 
 	return( TRUE );
@@ -834,81 +868,84 @@ static BOOLEAN selfTest( INOUT SCOREBOARD_INFO *scoreboardInfo )
 /* Initialise and shut down the scoreboard */
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
-int initScoreboard( INOUT TYPECAST( SCOREBOARD_INFO * ) \
-						void *scoreboardInfoPtr, 
+int initScoreboard( INOUT TYPECAST( SCOREBOARD_INDEX_INFO * ) \
+						void *scoreboardIndexInfoPtr, 
 					IN_LENGTH_SHORT_MIN( SCOREBOARD_MIN_SIZE ) \
 						const int scoreboardEntries )
 	{
-	SCOREBOARD_INFO *scoreboardInfo = scoreboardInfoPtr;
+	SCOREBOARD_INDEX_INFO *scoreboardIndexInfo = scoreboardIndexInfoPtr;
 	SCOREBOARD_INDEX *scoreboardIndex;
 	SCOREBOARD_DATA *scoreboardData;
 	int i, status;
 
-	assert( isWritePtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
+	assert( isWritePtr( scoreboardIndexInfo, 
+						sizeof( SCOREBOARD_INDEX_INFO ) ) );
 	
-	static_assert( sizeof( SCOREBOARD_STATE ) >= sizeof( SCOREBOARD_INFO ), \
+	static_assert( sizeof( SCOREBOARD_STATE ) >= sizeof( SCOREBOARD_INDEX_INFO ), \
 				   "Scoreboard size" );
 
 	REQUIRES( scoreboardEntries >= SCOREBOARD_MIN_SIZE && \
 			  scoreboardEntries <= SCOREBOARD_MAX_SIZE );
+
+	/* Allocate memory for the scoreboard, which we can do before acquiring 
+	   the scoreboard mutex */
+	scoreboardIndex = clAlloc( "initScoreboard", \
+						scoreboardEntries * sizeof( SCOREBOARD_INDEX ) );
+	if( scoreboardIndex == NULL )
+		return( CRYPT_ERROR_MEMORY );
+	status = krnlMemalloc( ( void ** ) &scoreboardData, \
+						   scoreboardEntries * sizeof( SCOREBOARD_DATA ) );
+	if( cryptStatusError( status ) )
+		{
+		clFree( "initScoreboard", scoreboardIndex );
+		return( status );
+		}
 
 	status = krnlEnterMutex( MUTEX_SCOREBOARD );
 	if( cryptStatusError( status ) )
 		return( status );
 
 	/* Initialise the scoreboard */
-	memset( scoreboardInfo, 0, sizeof( SCOREBOARD_INFO ) );
-	scoreboardInfo->uniqueID = 0;
-	scoreboardInfo->lastEntry = 0;
-	scoreboardInfo->noEntries = scoreboardEntries;
-
-	/* Initialise the scoreboard data */
-	if( ( scoreboardInfo->index = clAlloc( "initScoreboard", \
-				scoreboardEntries * sizeof( SCOREBOARD_INDEX ) ) ) == NULL )
-		return( CRYPT_ERROR_MEMORY );
-	status = krnlMemalloc( &scoreboardInfo->data, \
-						   scoreboardEntries * sizeof( SCOREBOARD_DATA ) );
-	if( cryptStatusError( status ) )
-		{
-		clFree( "initScoreboard", scoreboardInfo->index );
-		memset( scoreboardInfo, 0, sizeof( SCOREBOARD_INFO ) );
-		return( status );
-		}
-	scoreboardIndex = scoreboardInfo->index;
-	scoreboardData = scoreboardInfo->data;
+	memset( scoreboardIndexInfo, 0, sizeof( SCOREBOARD_INDEX_INFO ) );
+	scoreboardIndexInfo->index = scoreboardIndex;
+	scoreboardIndexInfo->data = scoreboardData;
+	scoreboardIndexInfo->noEntries = scoreboardEntries;
+	scoreboardIndexInfo->lastEntry = 0;
+	scoreboardIndexInfo->uniqueID = 0;
 	memset( scoreboardIndex, 0, \
 			scoreboardEntries * sizeof( SCOREBOARD_INDEX ) );
 	for( i = 0; i < scoreboardEntries; i++ )
-		{
 		scoreboardIndex[ i ].data = &scoreboardData[ i ];
-		scoreboardIndex[ i ].dataLength = 0;
-		}
-	memset( scoreboardInfo->data, 0, \
+	memset( scoreboardIndexInfo->data, 0, \
 			scoreboardEntries * sizeof( SCOREBOARD_DATA ) );
 
 	/* Make sure that everything's working as intended */
-	if( !selfTest( scoreboardInfo ) )
+#ifndef CONFIG_FUZZ
+	if( !selfTest( scoreboardIndexInfo ) )
 		{
-		status = krnlMemfree( ( void ** ) &scoreboardInfo->data );
+		status = krnlMemfree( ( void ** ) &scoreboardIndexInfo->data );
 		ENSURES( cryptStatusOK( status ) );
-		clFree( "initScoreboard", scoreboardInfo->index );
-		memset( scoreboardInfo, 0, sizeof( SCOREBOARD_INFO ) );
+		clFree( "initScoreboard", scoreboardIndexInfo->index );
+		memset( scoreboardIndexInfo, 0, sizeof( SCOREBOARD_INDEX_INFO ) );
 
+		krnlExitMutex( MUTEX_SCOREBOARD );
 		retIntError();
 		}
+#endif /* !CONFIG_FUZZ */
 
 	krnlExitMutex( MUTEX_SCOREBOARD );
 	return( CRYPT_OK );
 	}
 
 STDC_NONNULL_ARG( ( 1 ) ) \
-void endScoreboard( INOUT TYPECAST( SCOREBOARD_INFO * ) \
-						void *scoreboardInfoPtr )
+void endScoreboard( INOUT TYPECAST( SCOREBOARD_INDEX_INFO * ) \
+						void *scoreboardIndexInfoPtr )
 	{
-	SCOREBOARD_INFO *scoreboardInfo = scoreboardInfoPtr;
+	SCOREBOARD_INDEX_INFO *scoreboardIndexInfo = scoreboardIndexInfoPtr;
 	int status;
 
-	assert( isWritePtr( scoreboardInfo, sizeof( SCOREBOARD_INFO ) ) );
+	assert( isWritePtr( scoreboardIndexInfo, 
+						sizeof( SCOREBOARD_INDEX_INFO ) ) );
 
 	/* Shut down the scoreboard.  We acquire the mutex while we're doing 
 	   this to ensure that any threads still using it have exited before we 
@@ -922,12 +959,12 @@ void endScoreboard( INOUT TYPECAST( SCOREBOARD_INFO * ) \
 	ENSURES_V( cryptStatusOK( status ) );	/* See comment above */
 
 	/* Clear and free the scoreboard */
-	status = krnlMemfree( ( void ** ) &scoreboardInfo->data );
+	status = krnlMemfree( ( void ** ) &scoreboardIndexInfo->data );
 	ENSURES_V( cryptStatusOK( status ) );	/* See comment above */
-	zeroise( scoreboardInfo->index, \
-			 scoreboardInfo->noEntries * sizeof( SCOREBOARD_INDEX ) );
-	clFree( "endScoreboard", scoreboardInfo->index );
-	zeroise( scoreboardInfo, sizeof( SCOREBOARD_INFO ) );
+	zeroise( scoreboardIndexInfo->index, \
+			 scoreboardIndexInfo->noEntries * sizeof( SCOREBOARD_INDEX ) );
+	clFree( "endScoreboard", scoreboardIndexInfo->index );
+	zeroise( scoreboardIndexInfo, sizeof( SCOREBOARD_INDEX_INFO ) );
 
 	krnlExitMutex( MUTEX_SCOREBOARD );
 	}

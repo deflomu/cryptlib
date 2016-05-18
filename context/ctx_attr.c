@@ -167,8 +167,7 @@ int getContextAttribute( INOUT CONTEXT_INFO *contextInfoPtr,
 
 		case CRYPT_CTXINFO_BLOCKSIZE:
 			if( contextType == CONTEXT_CONV && \
-				( contextInfoPtr->ctxConv->mode == CRYPT_MODE_CFB || \
-				  contextInfoPtr->ctxConv->mode == CRYPT_MODE_OFB ) )
+				contextInfoPtr->ctxConv->mode == CRYPT_MODE_CFB )
 				*valuePtr = 1;	/* Block cipher in stream mode */
 			else
 				*valuePtr = capabilityInfoPtr->blockSize;
@@ -287,8 +286,8 @@ int getContextAttributeS( INOUT CONTEXT_INFO *contextInfoPtr,
 					return( attributeCopy( msgData, "CBC", 3 ) );
 				case CRYPT_MODE_CFB:
 					return( attributeCopy( msgData, "CFB", 3 ) );
-				case CRYPT_MODE_OFB:
-					return( attributeCopy( msgData, "OFB", 3 ) );
+				case CRYPT_MODE_GCM:
+					return( attributeCopy( msgData, "GCM", 3 ) );
 				}
 			retIntError();
 
@@ -388,23 +387,50 @@ int getContextAttributeS( INOUT CONTEXT_INFO *contextInfoPtr,
 
 		case CRYPT_IATTRIBUTE_KEY_PGP:
 		case CRYPT_IATTRIBUTE_KEY_SSH:
-		case CRYPT_IATTRIBUTE_KEY_SSH1:
 		case CRYPT_IATTRIBUTE_KEY_SSL:
 			{
+			const PKC_WRITEKEY_FUNCTION writePublicKeyFunction = \
+				FNPTR_GET( contextInfoPtr->ctxPKC->writePublicKeyFunction );
 			STREAM stream;
 			KEYFORMAT_TYPE formatType;
 
 			REQUIRES( contextType == CONTEXT_PKC && \
 					  !needsKey( contextInfoPtr ) );
+			REQUIRES( writePublicKeyFunction != NULL );
+
+			/* Writing a key in PGP format requires that it have a creation 
+			   time associated with it, however keys from non-PGP sources 
+			   don't have this.  In order to be able to write the key we 
+			   have to set one in order to have something to write out.  
+			   This means that a side-effect of writing the key is to give 
+			   it a creation time.  This is somewhat unfortunate, however 
+			   the standard never actually explains what this field is for
+			   so it probably doesn't matter what we set it to.
+			   
+			   A bigger problem though is that the creation time is hashed
+			   into the key ID when the ID is generated, which means that 
+			   moving a key via a non-PGP format changes its key ID.  
+			   Because of this we leave the ID for any key that we write at 
+			   its default value, zero for one from a non-PGP source, or the
+			   PGP time for one from a PGP source (and hope it doesn't go 
+			   via a non-PGP form at some point) */
+#if defined( USE_PGP ) && 0
+			if( contextInfoPtr->ctxPKC->pgpCreationTime <= MIN_TIME_VALUE )
+				{
+				/* We're not too fussed about the value given for the 
+				   creation time (see the comment above), as long as it's 
+				   approximately valid */
+				contextInfoPtr->ctxPKC->pgpCreationTime = getApproxTime();
+				}
+#endif /* USE_PGP */
 
 			/* Write the appropriately-formatted key data from the context */
 			status = attributeToFormatType( attribute, &formatType );
 			if( cryptStatusError( status ) )
 				return( status );
 			sMemOpenOpt( &stream, msgData->data, msgData->length );
-			status = contextInfoPtr->ctxPKC->writePublicKeyFunction( &stream,
-												contextInfoPtr, formatType, 
-												"public_key", 10 );
+			status = writePublicKeyFunction( &stream, contextInfoPtr, 
+											 formatType,  "public_key", 10 );
 			if( cryptStatusOK( status ) )
 				msgData->length = stell( &stream );
 			sMemDisconnect( &stream );
@@ -425,6 +451,15 @@ int getContextAttributeS( INOUT CONTEXT_INFO *contextInfoPtr,
 									   KEYID_SIZE ) );
 #endif /* USE_HARDWARE */
 			return( CRYPT_ERROR_NOTFOUND );
+
+		case CRYPT_IATTRIBUTE_KDFPARAMS:
+			REQUIRES( contextType == CONTEXT_GENERIC );
+
+			if( contextInfoPtr->ctxGeneric->kdfParamSize <= 0 )
+				return( CRYPT_ERROR_NOTFOUND );
+			return( attributeCopy( msgData, 
+								   contextInfoPtr->ctxGeneric->kdfParams, 
+								   contextInfoPtr->ctxGeneric->kdfParamSize ) );
 
 		case CRYPT_IATTRIBUTE_ENCPARAMS:
 			REQUIRES( contextType == CONTEXT_GENERIC );
@@ -472,7 +507,7 @@ int setContextAttribute( INOUT CONTEXT_INFO *contextInfoPtr,
 	{
 	const CAPABILITY_INFO *capabilityInfoPtr = contextInfoPtr->capabilityInfo;
 	const CONTEXT_TYPE contextType = contextInfoPtr->type;
-	int *valuePtr;
+	int *valuePtr, status;
 
 	assert( isWritePtr( contextInfoPtr, sizeof( CONTEXT_INFO ) ) );
 
@@ -500,7 +535,7 @@ int setContextAttribute( INOUT CONTEXT_INFO *contextInfoPtr,
 			   value, it's already been explicitly set and we can't change 
 			   it again.  This isn't quite as straightforward as it seems
 			   because the definition of "initial default mode" is a bit
-			   vague, for stream ciphers it's OFB, for block ciphers it's
+			   vague, for stream ciphers it's CTR, for block ciphers it's
 			   usually CBC unless we're working with specific hardware 
 			   crypto that only supports one mode and that mode isn't CBC.
 			   For now this only seems to be ECB so we add a special-case
@@ -508,7 +543,7 @@ int setContextAttribute( INOUT CONTEXT_INFO *contextInfoPtr,
 			if( isStreamCipher( capabilityInfoPtr->cryptAlgo ) )
 				{
 				/* It's a stream cipher, the only possible mode is an
-				   implicit OFB so any attempt to change it isn't valid */
+				   implicit CTR so any attempt to change it isn't valid */
 				return( exitErrorInited( contextInfoPtr, 
 										 CRYPT_CTXINFO_MODE ) );
 				}
@@ -723,6 +758,20 @@ int setContextAttribute( INOUT CONTEXT_INFO *contextInfoPtr,
 				}
 			return( CRYPT_OK );
 
+		case CRYPT_IATTRIBUTE_KEY_DLPPARAM:
+			status = loadDHparams( contextInfoPtr, value );
+			if( cryptStatusOK( status ) )
+				status = completeKeyLoad( contextInfoPtr, FALSE );
+			return( status );
+
+#if defined( USE_ECDH ) || defined( USE_ECDSA ) 
+		case CRYPT_IATTRIBUTE_KEY_ECCPARAM:
+			status = loadECCparams( contextInfoPtr, value );
+			if( cryptStatusOK( status ) )
+				status = completeKeyLoad( contextInfoPtr, FALSE );
+			return( status );
+#endif /* USE_ECDH || USE_ECDSA */
+
 		case CRYPT_IATTRIBUTE_DEVICEOBJECT:
 #ifdef USE_DEVICES
 			/* Setting the device object means that the crypto functionality 
@@ -798,10 +847,15 @@ int setContextAttributeS( INOUT CONTEXT_INFO *contextInfoPtr,
 			return( deriveKey( contextInfoPtr, data, dataLength ) );
 
 		case CRYPT_CTXINFO_KEY:
+			{
+			const CTX_LOADKEY_FUNCTION loadKeyFunction = \
+						FNPTR_GET( contextInfoPtr->loadKeyFunction );
+
 			REQUIRES( contextType == CONTEXT_CONV || \
 					  contextType == CONTEXT_MAC || \
 					  contextType == CONTEXT_GENERIC );
 			REQUIRES( needsKey( contextInfoPtr ) );
+			REQUIRES( loadKeyFunction != NULL );
 
 			/* If it's a persistent context we need to have a key label set 
 			   before we can continue */
@@ -818,11 +872,11 @@ int setContextAttributeS( INOUT CONTEXT_INFO *contextInfoPtr,
 				return( CRYPT_ARGERROR_NUM1 );
 
 			/* Load the key into the context */
-			status = contextInfoPtr->loadKeyFunction( contextInfoPtr,
-													  data, dataLength );
+			status = loadKeyFunction( contextInfoPtr, data, dataLength );
 			if( cryptStatusOK( status ) )
 				contextInfoPtr->flags |= CONTEXT_FLAG_KEY_SET;
 			return( status );
+			}
 
 #ifndef USE_FIPS140
 		case CRYPT_CTXINFO_KEY_COMPONENTS:
@@ -941,7 +995,8 @@ int setContextAttributeS( INOUT CONTEXT_INFO *contextInfoPtr,
 			REQUIRES( contextType == CONTEXT_PKC );
 			REQUIRES( contextInfoPtr->capabilityInfo->cryptAlgo == CRYPT_ALGO_RSA || \
 					  contextInfoPtr->capabilityInfo->cryptAlgo == CRYPT_ALGO_DSA || \
-					  contextInfoPtr->capabilityInfo->cryptAlgo == CRYPT_ALGO_ELGAMAL );
+					  contextInfoPtr->capabilityInfo->cryptAlgo == CRYPT_ALGO_ELGAMAL || \
+					  contextInfoPtr->capabilityInfo->cryptAlgo == CRYPT_ALGO_ECDSA );
 			REQUIRES( dataLength == PGP_KEYID_SIZE );
 
 			memcpy( contextInfoPtr->ctxPKC->openPgpKeyID, data, dataLength );
@@ -963,7 +1018,6 @@ int setContextAttributeS( INOUT CONTEXT_INFO *contextInfoPtr,
 		case CRYPT_IATTRIBUTE_KEY_SPKI:
 		case CRYPT_IATTRIBUTE_KEY_PGP:
 		case CRYPT_IATTRIBUTE_KEY_SSH:
-		case CRYPT_IATTRIBUTE_KEY_SSH1:
 		case CRYPT_IATTRIBUTE_KEY_SSL:
 		case CRYPT_IATTRIBUTE_KEY_SPKI_PARTIAL:
 		case CRYPT_IATTRIBUTE_KEY_PGP_PARTIAL:
@@ -985,6 +1039,15 @@ int setContextAttributeS( INOUT CONTEXT_INFO *contextInfoPtr,
 			memcpy( contextInfoPtr->deviceStorageID, data, dataLength );
 			contextInfoPtr->deviceStorageIDset = TRUE;
 #endif /* USE_HARDWARE */
+			return( CRYPT_OK );
+
+		case CRYPT_IATTRIBUTE_KDFPARAMS:
+			REQUIRES( dataLength > 0 && dataLength <= CRYPT_MAX_TEXTSIZE );
+
+			memcpy( contextInfoPtr->ctxGeneric->kdfParams, data, 
+					dataLength );
+			contextInfoPtr->ctxGeneric->kdfParamSize = dataLength;
+
 			return( CRYPT_OK );
 
 		case CRYPT_IATTRIBUTE_ENCPARAMS:

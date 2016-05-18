@@ -65,12 +65,10 @@ void fastPoll( void )
 	Point point;
 	WindowPtr windowPtr;
 	PScrapStuff scrapInfo;
-	UnsignedWide usSinceStartup;
 	BYTE dataBuffer[ 2 + 8 ];
 /*	short driverRefNum; */
 	UInt32 dateTime;
 /*	int count, dummy; */
-	NumVersion version;
 
 	initRandomData( randomState, buffer, RANDOM_BUFSIZE );
 
@@ -104,7 +102,9 @@ void fastPoll( void )
 	addRandomValue( randomState, FreeMem() );
 	addRandomValue( randomState, FreeMemSys() );
 #endif
-/*	MicroSeconds( &usSinceStartup );
+/*	UnsignedWide usSinceStartup;
+
+	MicroSeconds( &usSinceStartup );
 	addRandomData( randomState, &usSinceStartup, sizeof( UnsignedWide ) ); */
 	addRandomValue( randomState, QDDone( NULL ) );
 /*	ModemStatus( dataBuffer );
@@ -177,7 +177,9 @@ void fastPoll( void )
 	addRandomData( randomState, &soundStatus, sizeof( SMStatus ) );
 
 	/* Get the speech manager version and status */
-/*	version = SpeechManagerVersion();
+/*	NumVersion version;
+
+	version = SpeechManagerVersion();
 	addRandomData( randomState, &version, sizeof( NumVersion ) );
 	addRandomValue( randomState, SpeechBusy() );
 */
@@ -208,7 +210,6 @@ void slowPoll( void )
 	BYTE buffer[ RANDOM_BUFSIZE + 8 ];
 	ProcessSerialNumber psn;
 	GDHandle deviceHandle;
-	GrafPtr currPort;
 	QElemPtr queuePtr;
 	QHdrPtr queueHdr;
 	static BOOLEAN addedFixedItems = FALSE;
@@ -264,12 +265,10 @@ void slowPoll( void )
 	   add them once */
 	if( !addedFixedItems )
 		{
-		Str255 appName, volName;
+		Str255 volName;
 		GDHandle deviceHandle;
-		Handle appHandle;
 		DrvSts driveStatus;
 		MachineLocation machineLocation;
-		ProcessInfoRec processInfo;
 		QHdrPtr vblQueue;
 		SysEnvRec sysEnvirons;
 		SysPPtr pramPtr;
@@ -281,7 +280,7 @@ void slowPoll( void )
 			"\p.AIn", "\p.AOut", "\p.AppleCD", "\p.ATP", "\p.BIn", "\p.BOut", "\p.MPP",
 			"\p.Print", "\p.Sony", "\p.Sound", "\p.XPP", NULL
 			};
-		SInt16 count, dummy, i, node, net, vRefNum, script;
+		SInt16 count, node, net, vRefNum, script;
 		SInt32 lcount, volume;
 
 		/* Get the current font family ID, node ID of the local AppleMumble
@@ -331,6 +330,8 @@ void slowPoll( void )
 		/* Get the number of documents/files which were selected when the app
 		   started and for each document get the vRefNum, name, type, and
 		   version -- OBSOLETE
+		SInt16 dummy;
+
 		CountAppFiles( &dummy, &count );
 		addRandomValue( randomState, count );
 		while( count > 0 )
@@ -343,6 +344,9 @@ void slowPoll( void )
 
 		/* Get the app's name, resource file reference number, and handle to
 		   the finder information -- OBSOLETE
+		Str255 appName;
+		Handle appHandle;
+		
 		GetAppParams( appName, appHandle, &count );
 		addRandomData( randomState, appName, sizeof( Str255 ) );
 		addRandomValue( randomState, appHandle );

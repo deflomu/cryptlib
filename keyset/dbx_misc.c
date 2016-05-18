@@ -7,12 +7,12 @@
 
 #if defined( INC_ALL )
   #include "crypt.h"
-  #include "keyset.h"
   #include "dbms.h"
+  #include "keyset.h"
 #else
   #include "crypt.h"
-  #include "keyset/keyset.h"
   #include "keyset/dbms.h"
+  #include "keyset/keyset.h"
 #endif /* Compiler-specific includes */
 
 #ifdef USE_DBMS
@@ -211,8 +211,9 @@
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 3, 5 ) ) \
 int makeKeyID( OUT_BUFFER( keyIdMaxLen, *keyIdLen ) char *keyID, 
-			   IN_LENGTH_SHORT_MIN( 16 ) const int keyIdMaxLen, 
-			   OUT_LENGTH_SHORT_Z int *keyIdLen,
+			   IN_LENGTH_SHORT_MIN( ENCODED_DBXKEYID_SIZE ) \
+					const int keyIdMaxLen,
+			   OUT_LENGTH_BOUNDED_Z( keyIdMaxLen ) int *keyIdLen,
 			   IN_KEYID const CRYPT_KEYID_TYPE iDtype, 
 			   IN_BUFFER( idValueLength ) const void *idValue, 
 			   IN_LENGTH_SHORT const int idValueLength )
@@ -224,7 +225,8 @@ int makeKeyID( OUT_BUFFER( keyIdMaxLen, *keyIdLen ) char *keyID,
 	assert( isWritePtr( keyIdLen, sizeof( int ) ) );
 	assert( isReadPtr( keyID, idValueLength ) );
 
-	REQUIRES( keyIdMaxLen >= 16 && keyIdMaxLen < MAX_INTLENGTH_SHORT );
+	REQUIRES( keyIdMaxLen >= ENCODED_DBXKEYID_SIZE && \
+			  keyIdMaxLen < MAX_INTLENGTH_SHORT );
 	REQUIRES( iDtype == CRYPT_KEYID_NAME || \
 			  iDtype == CRYPT_KEYID_URI || \
 			  iDtype == CRYPT_IKEYID_KEYID || \
@@ -271,7 +273,7 @@ int makeKeyID( OUT_BUFFER( keyIdMaxLen, *keyIdLen ) char *keyID,
 	   always hash it to a fixed-length value */
 	if( iDtype == CRYPT_IKEYID_KEYID )
 		{
-		HASHFUNCTION_ATOMIC hashFunctionAtomic;
+		HASH_FUNCTION_ATOMIC hashFunctionAtomic;
 
 		/* Get the hash algorithm information and hash the keyID to get
 		   the fixed-length keyID */
@@ -302,7 +304,7 @@ int makeKeyID( OUT_BUFFER( keyIdMaxLen, *keyIdLen ) char *keyID,
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 3 ) ) \
 int getKeyID( OUT_BUFFER( keyIdMaxLen, *keyIdLen ) char *keyID, 
 			  IN_LENGTH_SHORT_MIN( 16 ) const int keyIdMaxLen, 
-			  OUT_LENGTH_SHORT_Z int *keyIdLen,
+			  OUT_LENGTH_BOUNDED_Z( keyIdMaxLen ) int *keyIdLen,
 			  IN_HANDLE const CRYPT_HANDLE iCryptHandle,
 			  IN_ATTRIBUTE const CRYPT_ATTRIBUTE_TYPE keyIDtype )
 	{
@@ -343,7 +345,7 @@ int getKeyID( OUT_BUFFER( keyIdMaxLen, *keyIdLen ) char *keyID,
 	else
 		{
 		DYNBUF idDB;
-		HASHFUNCTION_ATOMIC hashFunctionAtomic;
+		HASH_FUNCTION_ATOMIC hashFunctionAtomic;
 		int hashSize;
 
 		/* Get the attribute data and hash it to get the ID */
@@ -362,12 +364,12 @@ int getKeyID( OUT_BUFFER( keyIdMaxLen, *keyIdLen ) char *keyID,
 					   hashBuffer, KEYID_SIZE ) );
 	}
 
-/* Get a certID for a certificate */
+/* Get a keyID for a certificate and pkiUser */
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 3 ) ) \
 int getCertKeyID( OUT_BUFFER( keyIdMaxLen, *keyIdLen ) char *keyID, 
 				  IN_LENGTH_SHORT_MIN( 16 ) const int keyIdMaxLen, 
-				  OUT_LENGTH_SHORT_Z int *keyIdLen,
+				  OUT_LENGTH_BOUNDED_Z( keyIdMaxLen ) int *keyIdLen,
 				  IN_HANDLE const CRYPT_CERTIFICATE iCryptCert )
 	{
 	int status;
@@ -405,6 +407,47 @@ int getCertKeyID( OUT_BUFFER( keyIdMaxLen, *keyIdLen ) char *keyID,
 					  CRYPT_IATTRIBUTE_SPKI ) );
 	}
 
+CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 3 ) ) \
+int getPkiUserKeyID( OUT_BUFFER( keyIdMaxLen, *keyIdLen ) char *keyID, 
+					 IN_LENGTH_SHORT_MIN( 16 ) const int keyIdMaxLen, 
+					 OUT_LENGTH_BOUNDED_Z( keyIdMaxLen ) int *keyIdLen,
+					 IN_HANDLE const CRYPT_CERTIFICATE iCryptCert )
+	{
+	MESSAGE_DATA msgData;
+	BYTE binaryKeyID[ 64 + 8 ];
+	char encKeyID[ CRYPT_MAX_TEXTSIZE + 8 ];
+	int binaryKeyIDlength DUMMY_INIT, status;
+
+	assert( isWritePtr( keyID, keyIdMaxLen ) );
+	assert( isWritePtr( keyIdLen, sizeof( int ) ) );
+
+	REQUIRES( keyIdMaxLen >= 16 && keyIdMaxLen < MAX_INTLENGTH_SHORT );
+	REQUIRES( isHandleRangeValid( iCryptCert ) );
+
+	/* Clear return values */
+	memset( keyID, 0, min( 16, keyIdMaxLen ) );
+	*keyIdLen = 0;
+
+	/* Get the keyID as the PKI user ID.  We can't read this directly since 
+	   it's returned in text form for use by end users so we have to read 
+	   the encoded form, decode it, and then turn the decoded binary value 
+	   into a key ID.  We identify the result as a keyID, 
+	   (== subjectKeyIdentifier, which it isn't really) but we need to use 
+	   this to ensure that it's hashed/expanded out to the correct size */
+	setMessageData( &msgData, encKeyID, CRYPT_MAX_TEXTSIZE );
+	status = krnlSendMessage( iCryptCert, IMESSAGE_GETATTRIBUTE_S,
+							  &msgData, CRYPT_CERTINFO_PKIUSER_ID );
+	if( cryptStatusOK( status ) )
+		status =  decodePKIUserValue( binaryKeyID, 64, &binaryKeyIDlength, 
+									  encKeyID, msgData.length );
+	if( cryptStatusError( status ) )
+		return( status );
+	ANALYSER_HINT( binaryKeyIDlength > 0 && \
+				   binaryKeyIDlength < MAX_INTLENGTH_SHORT );
+	return( makeKeyID( keyID, keyIdMaxLen, keyIdLen, CRYPT_IKEYID_KEYID, 
+					   binaryKeyID, binaryKeyIDlength ) );
+	}
+
 /* Extract certificate data from a certificate object.  Note that the 
    formatType is given as an int rather than an enumerated type because
    it can be either a CRYPT_CERTFORMAT_TYPE or a CRYPT_ATTRIBUTE_TYPE */
@@ -416,7 +459,8 @@ int extractCertData( IN_HANDLE const CRYPT_CERTIFICATE iCryptCert,
 						void *certDataBuffer, 
 					 IN_LENGTH_SHORT_MIN( MIN_CRYPT_OBJECTSIZE ) \
 						const int certDataMaxLength, 
-					 OUT_LENGTH_SHORT_Z int *certDataLength )
+					 OUT_LENGTH_BOUNDED_Z( certDataMaxLength ) \
+						int *certDataLength )
 	{
 	MESSAGE_DATA msgData;
 	int status;
@@ -495,9 +539,7 @@ CHECK_RETVAL_PTR \
 char *getKeyName( IN_KEYID const CRYPT_KEYID_TYPE keyIDtype )
 	{
 	REQUIRES_N( keyIDtype > CRYPT_KEYID_NONE && \
-				keyIDtype <= CRYPT_KEYID_LAST );
-				/* CRYPT_KEYID_LAST is mapped to the database-use-only 
-				   lookup value "nameID" */
+				keyIDtype < CRYPT_KEYID_LAST );
 
 	switch( keyIDtype )
 		{
@@ -510,14 +552,14 @@ char *getKeyName( IN_KEYID const CRYPT_KEYID_TYPE keyIDtype )
 		case CRYPT_IKEYID_KEYID:
 			return( "keyID" );
 
+		case CRYPT_IKEYID_SUBJECTID:
+			return( "nameID" );
+
 		case CRYPT_IKEYID_ISSUERID:
 			return( "issuerID" );
 
 		case CRYPT_IKEYID_CERTID:
 			return( "certID" );
-
-		case CRYPT_KEYID_LAST:
-			return( "nameID" );
 		}
 
 	retIntError_Null();
@@ -827,6 +869,8 @@ static int initFunction( INOUT KEYSET_INFO *keysetInfoPtr,
 							options : CRYPT_KEYOPT_NONE, &featureFlags );
 	if( cryptStatusError( status ) )
 		{
+		DEBUG_PRINT(( "Couldn't open database, message '%s'.",
+					  keysetInfoPtr->errorInfo.errorString ));
 		endDbxSession( keysetInfoPtr );
 		return( status );
 		}
@@ -1010,8 +1054,8 @@ int setAccessMethodDBMS( INOUT KEYSET_INFO *keysetInfoPtr,
 		return( status );
 
 	/* Set the access method pointers */
-	keysetInfoPtr->initFunction = initFunction;
-	keysetInfoPtr->shutdownFunction = shutdownFunction;
+	FNPTR_SET( keysetInfoPtr->initFunction, initFunction );
+	FNPTR_SET( keysetInfoPtr->shutdownFunction, shutdownFunction );
 	status = initDBMSread( keysetInfoPtr );
 	if( cryptStatusOK( status ) )
 		status = initDBMSwrite( keysetInfoPtr );
@@ -1024,7 +1068,7 @@ int setAccessMethodDBMS( INOUT KEYSET_INFO *keysetInfoPtr,
 		if( cryptStatusError( status ) )
 			return( status );
 		}
-	keysetInfoPtr->isBusyFunction = isBusyFunction;
+	FNPTR_SET( keysetInfoPtr->isBusyFunction, isBusyFunction );
 
 	return( CRYPT_OK );
 	}

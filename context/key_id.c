@@ -21,7 +21,7 @@
   #include "misc/pgp.h"
 #endif /* Compiler-specific includes */
 
-#ifdef USE_PKC
+#if defined( USE_INT_ASN1 ) && defined( USE_PKC )
 
 /****************************************************************************
 *																			*
@@ -29,78 +29,15 @@
 *																			*
 ****************************************************************************/
 
-/* Instantiate static context data from raw encoded public-key data */
-
-CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2, 3, 4 ) ) \
-static int initStaticContext( OUT CONTEXT_INFO *staticContextInfo,
-							  OUT PKC_INFO *contextData, 
-							  const CAPABILITY_INFO *capabilityInfoPtr,
-							  IN_BUFFER( publicKeyDataLength ) \
-									const void *publicKeyData,
-							  IN_LENGTH_SHORT_MIN( MIN_PKCSIZE ) \
-									const int publicKeyDataLength )
-	{
-	STREAM stream;
-	int status;
-
-	assert( isWritePtr( staticContextInfo, sizeof( CONTEXT_INFO ) ) );
-	assert( isWritePtr( contextData, sizeof( PKC_INFO ) ) );
-	assert( isReadPtr( capabilityInfoPtr, sizeof( CAPABILITY_INFO ) ) );
-	assert( isReadPtr( publicKeyData, publicKeyDataLength ) );
-
-	REQUIRES( publicKeyDataLength >= MIN_PKCSIZE && \
-			  publicKeyDataLength < MAX_INTLENGTH_SHORT );
-
-	/* Initialise a static context to read the key data into */
-	status = staticInitContext( staticContextInfo, CONTEXT_PKC, 
-								capabilityInfoPtr, contextData, 
-								sizeof( PKC_INFO ), NULL );
-	if( cryptStatusError( status ) )
-		return( status );
-
-	/* Read the key data into the static context and calculate the keyIDs.
-	   We can do this now that the data is in a native context rather than 
-	   being present only in raw encoded form */
-	sMemConnect( &stream, publicKeyData, publicKeyDataLength );
-	status = contextData->readPublicKeyFunction( &stream, staticContextInfo, 
-												 KEYFORMAT_CERT );
-	sMemDisconnect( &stream );
-	if( cryptStatusOK( status ) )
-		{
-		staticContextInfo->flags |= CONTEXT_FLAG_ISPUBLICKEY;
-		status = capabilityInfoPtr->initKeyFunction( staticContextInfo, 
-													 NULL, 0 );
-		}
-	if( cryptStatusError( status ) )
-		{
-		staticDestroyContext( staticContextInfo );
-		return( status );
-		}
-
-	return( CRYPT_OK );
-	}
-
-/****************************************************************************
-*																			*
-*				KeyID-from-Encoded-Data Calculation Routines				*
-*																			*
-****************************************************************************/
-
-/* Calculate a keyID when the only key data present is a raw encoded
-   SubjectPublicKeyInfo record.  This is a bit more complicated than the 
-   standard keyID calculation because while the hash-of-SPKI form is rather
-   easier to calculate, the other oddball forms aren't since they first 
-   require breaking down the SPKI into its components and then re-encoding 
-   them in the various ways that we need to calculate the other forms of 
-   keyID */
+/* Calculate a keyID from an encoded SubjectPublicKeyInfo record */
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 3 ) ) \
-static int calculateFlatKeyID( IN_BUFFER( keyInfoSize ) const void *keyInfo, 
+static int calculateFlatKeyID( IN_BUFFER( keyInfoSize ) const void *keyInfo,
 							   IN_LENGTH_SHORT_MIN( 16 ) const int keyInfoSize,
-							   OUT_BUFFER_FIXED( keyIdMaxLen ) BYTE *keyID, 
+							   OUT_BUFFER_FIXED( keyIdMaxLen ) BYTE *keyID,
 							   IN_LENGTH_FIXED( KEYID_SIZE ) const int keyIdMaxLen )
 	{
-	HASHFUNCTION_ATOMIC hashFunctionAtomic;
+	HASH_FUNCTION_ATOMIC hashFunctionAtomic;
 
 	assert( isReadPtr( keyInfo, keyInfoSize ) );
 	assert( isWritePtr( keyID, keyIdMaxLen ) );
@@ -115,12 +52,91 @@ static int calculateFlatKeyID( IN_BUFFER( keyInfoSize ) const void *keyInfo,
 	return( CRYPT_OK );
 	}
 
+/****************************************************************************
+*																			*
+*				KeyID-from-Encoded-Data Calculation Routines				*
+*																			*
+****************************************************************************/
+
+#ifdef USE_DEVICES
+
+/* Instantiate static context data from raw encoded public-key data */
+
+CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2, 3, 4 ) ) \
+static int initStaticContext( OUT CONTEXT_INFO *staticContextInfo,
+							  OUT PKC_INFO *contextData,
+							  const CAPABILITY_INFO *capabilityInfoPtr,
+							  IN_BUFFER( publicKeyDataLength ) \
+							  const void *publicKeyData,
+							  IN_LENGTH_SHORT_MIN( MIN_PKCSIZE ) \
+							  const int publicKeyDataLength )
+	{
+	PKC_READKEY_FUNCTION readPublicKeyFunction;
+	STREAM stream;
+	int status;
+
+	assert( isWritePtr( staticContextInfo, sizeof( CONTEXT_INFO ) ) );
+	assert( isWritePtr( contextData, sizeof( PKC_INFO ) ) );
+	assert( isReadPtr( capabilityInfoPtr, sizeof( CAPABILITY_INFO ) ) );
+	assert( isReadPtr( publicKeyData, publicKeyDataLength ) );
+
+	REQUIRES( ( isEccAlgo( capabilityInfoPtr->cryptAlgo ) && \
+				publicKeyDataLength >= MIN_PKCSIZE_ECCPOINT && \
+				publicKeyDataLength < MAX_INTLENGTH_SHORT ) || \
+			  ( !isEccAlgo( capabilityInfoPtr->cryptAlgo ) && \
+				publicKeyDataLength >= MIN_PKCSIZE && \
+				publicKeyDataLength < MAX_INTLENGTH_SHORT ) );
+
+	/* Clear return values */
+	memset( staticContextInfo, 0, sizeof( CONTEXT_INFO ) );
+	memset( contextData, 0, sizeof( PKC_INFO ) );
+
+	/* Initialise a static context to read the key data into */
+	status = staticInitContext( staticContextInfo, CONTEXT_PKC,
+								capabilityInfoPtr, contextData,
+								sizeof( PKC_INFO ), NULL );
+	if( cryptStatusError( status ) )
+		return( status );
+	readPublicKeyFunction = FNPTR_GET( contextData->readPublicKeyFunction );
+	ENSURES( readPublicKeyFunction != NULL );
+
+	/* Read the key data into the static context and calculate the keyIDs.
+	   We can do this now that the data is in a native context rather than
+	   being present only in raw encoded form */
+	sMemConnect( &stream, publicKeyData, publicKeyDataLength );
+	status = readPublicKeyFunction( &stream, staticContextInfo,
+									KEYFORMAT_CERT );
+	sMemDisconnect( &stream );
+	if( cryptStatusOK( status ) )
+		{
+		staticContextInfo->flags |= CONTEXT_FLAG_ISPUBLICKEY;
+		status = capabilityInfoPtr->initKeyFunction( staticContextInfo,
+													 NULL, 0 );
+		}
+	if( cryptStatusError( status ) )
+		{
+		staticDestroyContext( staticContextInfo );
+		return( status );
+		}
+
+	return( CRYPT_OK );
+	}
+
+/* Calculate a keyID when the only key data present is a raw encoded
+   SubjectPublicKeyInfo record.  This is a bit more complicated than the 
+   standard keyID calculation because while the hash-of-SPKI form is rather
+   easier to calculate, the other oddball forms aren't since they first 
+   require breaking down the SPKI into its components and then re-encoding 
+   them in the various ways that we need to calculate the other forms of 
+   keyID */
+
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
 static int calculateKeyIDFromEncoded( INOUT CONTEXT_INFO *contextInfoPtr,
 									  IN_ALGO const CRYPT_ALGO_TYPE cryptAlgo )
 	{
-	CONTEXT_INFO staticContextInfo;
+	CONTEXT_INFO staticContextInfo;\
 	PKC_INFO staticContextData, *publicKey = contextInfoPtr->ctxPKC;
+	const CAPABILITY_INFO *capabilityInfoPtr = NULL;
 	const BOOLEAN isPgpAlgo = \
 		( cryptAlgo == CRYPT_ALGO_RSA || cryptAlgo == CRYPT_ALGO_DSA || \
 		  cryptAlgo == CRYPT_ALGO_ELGAMAL ) ? TRUE : FALSE;
@@ -163,41 +179,39 @@ static int calculateKeyIDFromEncoded( INOUT CONTEXT_INFO *contextInfoPtr,
 		{
 #ifdef USE_DH
 		case CRYPT_ALGO_DH:
-			status = initStaticContext( &staticContextInfo, &staticContextData, 
-										getDHCapability(), 
-										publicKey->publicKeyInfo, 
-										publicKey->publicKeyInfoSize );
+			capabilityInfoPtr = getDHCapability();
 			break;
 #endif /* USE_DH */
 
 		case CRYPT_ALGO_RSA:
-			status = initStaticContext( &staticContextInfo, &staticContextData, 
-										getRSACapability(), 
-										publicKey->publicKeyInfo, 
-										publicKey->publicKeyInfoSize );
+			capabilityInfoPtr = getRSACapability();
 			break;
 
 #ifdef USE_DSA
 		case CRYPT_ALGO_DSA:
-			status = initStaticContext( &staticContextInfo, &staticContextData, 
-										getDSACapability(), 
-										publicKey->publicKeyInfo, 
-										publicKey->publicKeyInfoSize );
+			capabilityInfoPtr = getDSACapability();
 			break;
 #endif /* USE_DSA */
 
 #ifdef USE_ELGAMAL
 		case CRYPT_ALGO_ELGAMAL:
-			status = initStaticContext( &staticContextInfo, &staticContextData, 
-										getElgamalCapability(), 
-										publicKey->publicKeyInfo, 
-										publicKey->publicKeyInfoSize );
+			capabilityInfoPtr = getElgamalCapability();
 			break;
 #endif /* USE_ELGAMAL */
+
+#ifdef USE_ECDSA
+		case CRYPT_ALGO_ECDSA:
+			capabilityInfoPtr = getECDSACapability();
+			break;
+#endif /* USE_ECDSA */
 
 		default:
 			retIntError();
 		}
+	ENSURES( capabilityInfoPtr != NULL );
+	status = initStaticContext( &staticContextInfo, &staticContextData, 
+								capabilityInfoPtr, publicKey->publicKeyInfo, 
+								publicKey->publicKeyInfoSize );
 	if( cryptStatusError( status ) )
 		return( status );
 
@@ -230,6 +244,7 @@ static int calculateKeyIDFromEncoded( INOUT CONTEXT_INFO *contextInfoPtr,
 
 	return( CRYPT_OK );
 	}
+#endif /* USE_DEVICES */
 
 /****************************************************************************
 *																			*
@@ -246,7 +261,9 @@ static int calculateOpenPGPKeyID( INOUT CONTEXT_INFO *contextInfoPtr,
 								  IN_ALGO const CRYPT_ALGO_TYPE cryptAlgo )
 	{
 	PKC_INFO *publicKey = contextInfoPtr->ctxPKC;
-	HASHFUNCTION hashFunction;
+	const PKC_WRITEKEY_FUNCTION writePublicKeyFunction = \
+						FNPTR_GET( publicKey->writePublicKeyFunction );
+	HASH_FUNCTION hashFunction;
 	HASHINFO hashInfo;
 	STREAM stream;
 	BYTE buffer[ ( CRYPT_MAX_PKCSIZE * 4 ) + 50 + 8 ];
@@ -256,6 +273,7 @@ static int calculateOpenPGPKeyID( INOUT CONTEXT_INFO *contextInfoPtr,
 	assert( isWritePtr( contextInfoPtr, sizeof( CONTEXT_INFO ) ) );
 
 	REQUIRES( isPkcAlgo( cryptAlgo ) );
+	REQUIRES( writePublicKeyFunction != NULL );
 
 	/* Generate an OpenPGP key ID.  Note that the creation date isn't 
 	   necessarily present if the key came from a non-PGP source, in which 
@@ -279,9 +297,8 @@ static int calculateOpenPGPKeyID( INOUT CONTEXT_INFO *contextInfoPtr,
 	  We do this by writing the public key fields to a buffer and creating a 
 	  separate PGP public key header, then hashing the two */
 	sMemOpen( &stream, buffer, ( CRYPT_MAX_PKCSIZE * 4 ) + 50 );
-	status = publicKey->writePublicKeyFunction( &stream, contextInfoPtr, 
-												KEYFORMAT_PGP, 
-												"public_key", 10 );
+	status = writePublicKeyFunction( &stream, contextInfoPtr, KEYFORMAT_PGP, 
+									 "public_key", 10 );
 	if( cryptStatusError( status ) )
 		{
 		sMemClose( &stream );
@@ -316,16 +333,22 @@ static int writePKCS3Key( INOUT STREAM *stream,
 						  const PKC_INFO *dlpKey,
 						  IN_ALGO const CRYPT_ALGO_TYPE cryptAlgo )
 	{
+	const DH_DOMAINPARAMS *domainParams = dlpKey->domainParams;
+	const BIGNUM *p = ( domainParams != NULL ) ? \
+					  &domainParams->p : &dlpKey->dlpParam_p;
+	const BIGNUM *g = ( domainParams != NULL ) ? \
+					  &domainParams->g : &dlpKey->dlpParam_g;
 	const int parameterSize = ( int ) sizeofObject( \
-								sizeofBignum( &dlpKey->dlpParam_p ) + \
-								3 +		/* INTEGER value 0 */
-								sizeofBignum( &dlpKey->dlpParam_g ) );
+											sizeofBignum( p ) + \
+											3 +		/* INTEGER value 0 */
+											sizeofBignum( g ) );
 	const int componentSize = sizeofBignum( &dlpKey->dlpParam_y );
 	int totalSize;
 
 	assert( isWritePtr( stream, sizeof( STREAM ) ) );
 	assert( isReadPtr( dlpKey, sizeof( PKC_INFO ) ) );
 
+	REQUIRES( sanityCheckPKCInfo( dlpKey ) );
 	REQUIRES( isDlpAlgo( cryptAlgo ) );
 
 	/* Implement a cut-down version of writeDlpSubjectPublicKey(), writing a 
@@ -334,9 +357,9 @@ static int writePKCS3Key( INOUT STREAM *stream,
 				( int ) sizeofObject( componentSize + 1 );
 	writeSequence( stream, totalSize );
 	writeAlgoIDparam( stream, cryptAlgo, parameterSize );
-	writeBignum( stream, &dlpKey->dlpParam_p );
+	writeBignum( stream, p );
 	swrite( stream, "\x02\x01\x00", 3 );	/* Integer value 0 */
-	writeBignum( stream, &dlpKey->dlpParam_g );
+	writeBignum( stream, g );
 	writeBitStringHole( stream, componentSize, DEFAULT_TAG );
 	return( writeBignum( stream, &dlpKey->dlpParam_y ) );
 	}
@@ -354,6 +377,8 @@ CHECK_RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
 static int calculateKeyID( INOUT CONTEXT_INFO *contextInfoPtr )
 	{
 	PKC_INFO *publicKey = contextInfoPtr->ctxPKC;
+	const PKC_WRITEKEY_FUNCTION writePublicKeyFunction = \
+						FNPTR_GET( publicKey->writePublicKeyFunction );
 	STREAM stream;
 	BYTE buffer[ ( CRYPT_MAX_PKCSIZE * 4 ) + 50 + 8 ];
 	const CRYPT_ALGO_TYPE cryptAlgo = contextInfoPtr->capabilityInfo->cryptAlgo;
@@ -361,12 +386,20 @@ static int calculateKeyID( INOUT CONTEXT_INFO *contextInfoPtr )
 
 	assert( isWritePtr( contextInfoPtr, sizeof( CONTEXT_INFO ) ) );
 
+	REQUIRES( sanityCheckPKCInfo( publicKey ) );
 	REQUIRES( contextInfoPtr->type == CONTEXT_PKC );
+	REQUIRES( writePublicKeyFunction != NULL );
 
 	/* If the public key info is present in pre-encoded form, calculate the
 	   key ID directly from that */
 	if( publicKey->publicKeyInfo != NULL )
+		{
+#ifdef USE_DEVICES
 		return( calculateKeyIDFromEncoded( contextInfoPtr, cryptAlgo ) );
+#else
+		retIntError();
+#endif /* USE_DEVICES */
+		}
 
 	/* Write the public key fields to a buffer and hash them to get the key
 	   ID */
@@ -383,9 +416,8 @@ static int calculateKeyID( INOUT CONTEXT_INFO *contextInfoPtr )
 		}
 	else
 		{
-		status = publicKey->writePublicKeyFunction( &stream, contextInfoPtr, 
-													KEYFORMAT_CERT, 
-													"public_key", 10 );
+		status = writePublicKeyFunction( &stream, contextInfoPtr, 
+										 KEYFORMAT_CERT, "public_key", 10 );
 		}
 	if( cryptStatusOK( status ) )
 		status = calculateFlatKeyID( buffer, stell( &stream ), 
@@ -449,12 +481,39 @@ void initKeyID( INOUT CONTEXT_INFO *contextInfoPtr )
 	REQUIRES_V( contextInfoPtr->type == CONTEXT_PKC );
 
 	/* Set the access method pointers */
-	pkcInfo->calculateKeyIDFunction = calculateKeyID;
+	FNPTR_SET( pkcInfo->calculateKeyIDFunction, calculateKeyID );
 	}
 #else
+
+CHECK_RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
+static int calculateKeyIDDummy( INOUT CONTEXT_INFO *contextInfoPtr )
+	{
+	PKC_INFO *publicKey = contextInfoPtr->ctxPKC;
+	MESSAGE_DATA msgData;
+
+	assert( isWritePtr( contextInfoPtr, sizeof( CONTEXT_INFO ) ) );
+
+	REQUIRES( contextInfoPtr->type == CONTEXT_PKC );
+
+	/* If we're not using ASN.1 then we can't calculate keyIDs, but then no 
+	   code that requires keyIDs is actually enabled so we just set a dummy
+	   value for the ID */
+	setMessageData( &msgData, publicKey->keyID, KEYID_SIZE );
+	return( krnlSendMessage( SYSTEM_OBJECT_HANDLE, IMESSAGE_GETATTRIBUTE_S,
+							 &msgData, CRYPT_IATTRIBUTE_RANDOM_NONCE ) );
+	}
 
 STDC_NONNULL_ARG( ( 1 ) ) \
 void initKeyID( INOUT CONTEXT_INFO *contextInfoPtr )
 	{
+	PKC_INFO *pkcInfo = contextInfoPtr->ctxPKC;
+
+	assert( isWritePtr( contextInfoPtr, sizeof( CONTEXT_INFO ) ) );
+
+	REQUIRES_V( contextInfoPtr->type == CONTEXT_PKC );
+
+	/* Set the access method pointers */
+	FNPTR_SET( pkcInfo->calculateKeyIDFunction, calculateKeyIDDummy );
 	}
-#endif /* USE_PKC */
+#endif /* USE_INT_ASN1 && USE_PKC */
+

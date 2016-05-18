@@ -374,7 +374,7 @@ int getSessionAttributeS( INOUT SESSION_INFO *sessionInfoPtr,
 
 		case CRYPT_SESSINFO_USERNAME:
 		case CRYPT_SESSINFO_PASSWORD:
-		case CRYPT_SESSINFO_SERVER_FINGERPRINT:
+		case CRYPT_SESSINFO_SERVER_FINGERPRINT_SHA1:
 		case CRYPT_SESSINFO_SERVER_NAME:
 		case CRYPT_SESSINFO_CLIENT_NAME:
 			attributeListPtr = findSessionInfo( sessionInfoPtr->attributeList,
@@ -398,7 +398,7 @@ int getSessionAttributeS( INOUT SESSION_INFO *sessionInfoPtr,
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
 int setSessionAttribute( INOUT SESSION_INFO *sessionInfoPtr,
-						 IN_INT_Z const int value, 
+						 IN const int value, 
 						 IN_ATTRIBUTE const CRYPT_ATTRIBUTE_TYPE attribute )
 	{
 	int status;
@@ -408,6 +408,8 @@ int setSessionAttribute( INOUT SESSION_INFO *sessionInfoPtr,
 	REQUIRES( ( attribute == CRYPT_ATTRIBUTE_CURRENT_GROUP || \
 				attribute == CRYPT_ATTRIBUTE_CURRENT ) || 
 				/* CURRENT = cursor positioning code */
+			  ( attribute == CRYPT_SESSINFO_NETWORKSOCKET ) ||
+				/* Socket = non-typed value */
 			  ( value >= 0 && value < MAX_INTLENGTH ) );
 	REQUIRES( isAttribute( attribute ) || \
 			  isInternalAttribute( attribute ) );
@@ -421,6 +423,8 @@ int setSessionAttribute( INOUT SESSION_INFO *sessionInfoPtr,
 			ATTRIBUTE_LIST *attributeListPtr = \
 									sessionInfoPtr->attributeListCurrent;
 
+			REQUIRES( value >= CRYPT_CURSOR_LAST && \
+					  value <= CRYPT_CURSOR_FIRST );	/* Values are -ve */
 			status = setSessionAttributeCursor( sessionInfoPtr->attributeList,
 										&attributeListPtr, attribute, value );
 			if( cryptStatusError( status ) )
@@ -483,8 +487,8 @@ int setSessionAttribute( INOUT SESSION_INFO *sessionInfoPtr,
 			/* If the session is in the partially-open state while we wait 
 			   for the caller to allow or disallow the session authentication 
 			   they have to provide a clear yes or no indication by setting 
-			   the CRYPT_SESSINFO_AUTHRESPONSE to TRUE or FALSE before they 
-			   can try to continue the session activation */
+			   CRYPT_SESSINFO_AUTHRESPONSE to TRUE or FALSE before they can 
+			   try to continue the session activation */
 			if( ( sessionInfoPtr->flags & SESSION_PARTIALOPEN ) && \
 				sessionInfoPtr->authResponse == AUTHRESPONSE_NONE )
 				return( exitErrorNotInited( sessionInfoPtr,
@@ -615,17 +619,21 @@ int setSessionAttribute( INOUT SESSION_INFO *sessionInfoPtr,
 			if( requiredAttributeFlags & ( SESSION_NEEDS_PRIVKEYCERT | \
 										   SESSION_NEEDS_PRIVKEYCACERT ) )
 				{
-				status = checkServerCertValid( value, &sessionInfoPtr->errorLocus, 
-											   &sessionInfoPtr->errorType );
+				status = checkServerCertValid( value, SESSION_ERRINFO );
 				if( cryptStatusError( status ) )
 					return( CRYPT_ARGERROR_NUM1 );
 				}
 
 			/* Perform any protocol-specific additional checks if necessary */
-			if( sessionInfoPtr->checkAttributeFunction != NULL )
+			if( FNPTR_ISSET( sessionInfoPtr->checkAttributeFunction ) )
 				{
-				status = sessionInfoPtr->checkAttributeFunction( sessionInfoPtr,
-														&value, attribute );
+				const SES_CHECKATTRIBUTE_FUNCTION checkAttributeFunction = \
+						FNPTR_GET( sessionInfoPtr->checkAttributeFunction );
+
+				REQUIRES( checkAttributeFunction != NULL );
+
+				status = checkAttributeFunction( sessionInfoPtr, &value, 
+												 attribute );
 				if( status == OK_SPECIAL )
 					{
 					/* The value was dealt with as a side-effect of the check
@@ -721,7 +729,7 @@ int setSessionAttribute( INOUT SESSION_INFO *sessionInfoPtr,
 								sessionInfoPtr->connectTimeout,
 								NET_OPTION_NETWORKSOCKET_DUMMY );
 			connectInfo.networkSocket = value;
-			status = sNetConnect( &stream, STREAM_PROTOCOL_TCPIP, 
+			status = sNetConnect( &stream, STREAM_PROTOCOL_TCP, 
 								  &connectInfo, &sessionInfoPtr->errorInfo );
 			if( cryptStatusError( status ) )
 				return( status );
@@ -841,13 +849,17 @@ int setSessionAttributeS( INOUT SESSION_INFO *sessionInfoPtr,
 				}
 
 			/* Perform any protocol-specific additional checks if necessary */
-			if( sessionInfoPtr->checkAttributeFunction != NULL )
+			if( FNPTR_ISSET( sessionInfoPtr->checkAttributeFunction ) )
 				{
+				const SES_CHECKATTRIBUTE_FUNCTION checkAttributeFunction = \
+						FNPTR_GET( sessionInfoPtr->checkAttributeFunction );
 				MESSAGE_DATA msgData;
 
+				REQUIRES( checkAttributeFunction != NULL );
+
 				setMessageData( &msgData, ( MESSAGE_CAST ) data, dataLength );
-				status = sessionInfoPtr->checkAttributeFunction( sessionInfoPtr,
-														&msgData, attribute );
+				status = checkAttributeFunction( sessionInfoPtr, &msgData, 
+												 attribute );
 				if( status == OK_SPECIAL )
 					{
 					/* The value was dealt with as a side-effect of the check
@@ -863,7 +875,7 @@ int setSessionAttributeS( INOUT SESSION_INFO *sessionInfoPtr,
 									  attribute, data, dataLength, flags ) );
 			}
 
-		case CRYPT_SESSINFO_SERVER_FINGERPRINT:
+		case CRYPT_SESSINFO_SERVER_FINGERPRINT_SHA1:
 			/* Remember the value */
 			return( addSessionInfoS( &sessionInfoPtr->attributeList,
 									 attribute, data, dataLength ) );

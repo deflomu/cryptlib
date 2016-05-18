@@ -43,47 +43,51 @@
    which is a simple matter of a compare-and-subtract */
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2, 4 ) ) \
-static int hashToBignum( INOUT BIGNUM *bigNum, 
+static int hashToBignum( INOUT BIGNUM *bignum, 
 						 IN_BUFFER( hashLength ) const void *hash, 
 						 IN_LENGTH_HASH const int hashLength, 
 						 const BIGNUM *n )
 	{
-	const int hlen = bytesToBits( hashLength );
-	const int nlen = BN_num_bits( n );
+	const int hLen = bytesToBits( hashLength );
+	const int nLen = BN_num_bits( n );
 	int bnStatus = BN_STATUS, status;
 
-	assert( isWritePtr( bigNum, sizeof( BIGNUM ) ) );
+	assert( isWritePtr( bignum, sizeof( BIGNUM ) ) );
 	assert( isReadPtr( hash, hashLength ) );
 	assert( isReadPtr( n, sizeof( BIGNUM ) ) );
 
+	REQUIRES( sanityCheckBignum( bignum ) );
 	REQUIRES( hashLength >= 20 && hashLength <= CRYPT_MAX_HASHSIZE );
+	REQUIRES( nLen >= 20 && nLen <= bytesToBits( CRYPT_MAX_PKCSIZE_ECC ) );
 
 	/* Convert the hash value into a bignum.  We have to be careful when
 	   we specify the bounds because, with increasingly smaller 
 	   probabilities, the leading bytes of the hash value may be zero.
 	   The check used here gives one in 4 billion chance of a false
 	   positive */
-	status = importBignum( bigNum, hash, hashLength, 
+	status = importBignum( bignum, hash, hashLength, 
 						   hashLength - 3, hashLength + 1, NULL, 
 						   KEYSIZE_CHECK_NONE );
 	if( cryptStatusError( status ) )
 		return( status );
 
 	/* Shift out any extra bits */
-	if( hlen > nlen )
+	if( hLen > nLen )
 		{
-		CK( BN_rshift( bigNum, bigNum, hlen - nlen ) );
+		CK( BN_rshift( bignum, bignum, hLen - nLen ) );
 		if( bnStatusError( bnStatus ) )
 			return( getBnStatus( bnStatus ) );
 		}
 
 	/* Make sure that the value really is smaller than the group order */
-	if( BN_cmp( bigNum, n ) >= 0 )
+	if( BN_cmp( bignum, n ) >= 0 )
 		{
-		CK( BN_sub( bigNum, bigNum, n ) );
+		CK( BN_sub( bignum, bignum, n ) );
 		if( bnStatusError( bnStatus ) )
 			return( getBnStatus( bnStatus ) );
 		}
+
+	ENSURES( sanityCheckBignum( bignum ) );
 
 	return( CRYPT_OK );
 	}
@@ -199,6 +203,9 @@ static int selfTest( void )
 	{
 	CONTEXT_INFO contextInfo;
 	PKC_INFO contextData, *pkcInfo = &contextData;
+	const CAPABILITY_INFO *capabilityInfoPtr;
+	DLP_PARAMS dlpParams;
+	BYTE buffer[ 128 + 8 ];
 	int status;
 
 	/* Initialise the key components */
@@ -224,17 +231,37 @@ static int selfTest( void )
 		staticDestroyContext( &contextInfo );
 		retIntError();
 		}
+	capabilityInfoPtr = contextInfo.capabilityInfo;
+
+	ENSURES( sanityCheckPKCInfo( pkcInfo ) );
 
 	/* Perform the test sign/sig.check of the X9.62 test values */
-	status = contextInfo.capabilityInfo->initKeyFunction( &contextInfo, NULL, 0 );
-	if( cryptStatusOK( status ) && \
+	status = capabilityInfoPtr->initKeyFunction( &contextInfo, NULL, 0 );
+	if( cryptStatusError( status ) || \
 		!pairwiseConsistencyTest( &contextInfo ) )
-		status = CRYPT_ERROR_FAILED;
+		{
+		staticDestroyContext( &contextInfo );
+		return( CRYPT_ERROR_FAILED );
+		}
+
+	/* Finally, make sure that the memory fault-detection is working */
+	pkcInfo->eccParam_qx.d[ 1 ] ^= 0x1001;
+	setDLPParams( &dlpParams, shaM, 32, buffer, 128 );
+	dlpParams.inLen2 = -999;
+	status = capabilityInfoPtr->signFunction( &contextInfo,
+						( BYTE * ) &dlpParams, sizeof( DLP_PARAMS ) );
+	if( cryptStatusOK( status ) )
+		{
+		/* The fault-detection couldn't detect a bit-flip, there's a 
+		   problem */
+		staticDestroyContext( &contextInfo );
+		return( CRYPT_ERROR_FAILED );
+		}
 
 	/* Clean up */
 	staticDestroyContext( &contextInfo );
 
-	return( status );
+	return( CRYPT_OK );
 	}
 #else
 	#define selfTest	NULL
@@ -261,23 +288,29 @@ static int selfTest( void )
 /* Sign a single block of data.  There's a possibility of fault attacks 
    against ECDSA as detailed by a variety of authors, "Differential Fault 
    Attacks on Elliptic Curve Cryptosystems", Ingrid Biehl, Bernd Meyer and 
-   Volker Mueller, Crypto 2000, LNCS No.1880, p.131, "Validation of Elliptic 
-   Curve Public Keys", Adrian Antipa, Daniel Brown, Alfred Menezes, René 
-   Struik and Scott Vanstone, PKC 2003, LNCS No.2567, p.211, "Elliptic Curve 
-   Cryptosystems in the Presence of Permanent and Transient Faults", Mathieu 
-   Ciet and Marc Joye, Designs, Codes and Cryptography, Vol.36, No.1 (2005), 
-   p.33, and "Error Detection and Fault Tolerance in ECSM Using Input 
-   Randomisation", Agustin Dominguez-Oviedo and M. Anwar Hasan, IEEE 
-   Transactions on Dependable and Secure Computing, Vol.6, No.6, p.175, which
-   for the most case can be defended against by point validation, i.e.
-   through the use of isPointOnCurve() in kg_ecc.c.
-
-   A much simpler solution is just to verify the private-key operation with 
-   the matching public-key operation after we perform it.  This operation is 
-   handled at a higher level (to accomodate algorithms like RSA for which 
-   the private-key operation could be a sign or a decrypt and we only need 
-   to check the sign), performing a signature verify after each signature 
-   generation at the crypto mechanism level */
+   Volker Mueller, Proceedings of Crypto 2000, Springer-Verlag LNCS No.1880, 
+   August 2000, p.131, "Validation of Elliptic Curve Public Keys", Adrian 
+   Antipa, Daniel Brown, Alfred Menezes, René Struik and Scott Vanstone, 
+   Proceedings of the Public Key Cryptography Conference (PKC'03), Springer-
+   Verlag LNCS No.2567, January 2003, p.211, "Elliptic Curve Cryptosystems 
+   in the Presence of Permanent and Transient Faults", Mathieu Ciet and Marc 
+   Joye, Designs, Codes and Cryptography, Vol.36, No.1 (2005), p.33, "Error 
+   Detection and Fault Tolerance in ECSM Using Input Randomisation", Agustin 
+   Dominguez-Oviedo and M. Anwar Hasan, IEEE Transactions on Dependable and 
+   Secure Computing, Vol.6, No.6, p.175, and "Bit-flip Faults on Elliptic 
+   Curve Base Fields, Revisited", Taechan Kim and Mehdi Tibouchi, 
+   Proceedings of the Applied Cryptography and Network Security Conference 
+   (ACNS'14), Springer-Verlag LNCS No.8479, p.163, and no doubt many more in
+   the future.
+   
+   In some cases this can be defended against by point validation, i.e. 
+   through the use of isPointOnCurve() in kg_ecc.c, but a much simpler 
+   solution is just to verify the private-key operation with the matching 
+   public-key operation after we perform it.  This operation is handled at a 
+   higher level (to accomodate algorithms like RSA for which the private-key 
+   operation could be a sign or a decrypt and we only need to check the 
+   sign), performing a signature verify after each signature generation at 
+   the crypto mechanism level */
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2 ) ) \
 static int sign( INOUT CONTEXT_INFO *contextInfoPtr, 
@@ -286,11 +319,16 @@ static int sign( INOUT CONTEXT_INFO *contextInfoPtr,
 	{
 	PKC_INFO *pkcInfo = contextInfoPtr->ctxPKC;
 	DLP_PARAMS *eccParams = ( DLP_PARAMS * ) buffer;
-	BIGNUM *n = &pkcInfo->eccParam_n;
+	const PKC_ENCODEDLVALUES_FUNCTION encodeDLValuesFunction = \
+					FNPTR_GET( pkcInfo->encodeDLValuesFunction );
+	const ECC_DOMAINPARAMS *domainParams = pkcInfo->domainParams;
+	const BIGNUM *n = &domainParams->n;
 	BIGNUM *hash = &pkcInfo->tmp1, *x = &pkcInfo->tmp2;
-	BIGNUM *k = &pkcInfo->tmp3, *r = &pkcInfo->tmp4, *s = &pkcInfo->tmp5;
+	BIGNUM *k = &pkcInfo->tmp3, *r = &pkcInfo->eccParam_tmp4;
+	BIGNUM *s = &pkcInfo->eccParam_tmp5;
 	EC_GROUP *ecCTX = pkcInfo->ecCTX;
 	EC_POINT *kg = pkcInfo->tmpPoint;
+	const int nLen = BN_num_bytes( n );
 	int bnStatus = BN_STATUS, status = CRYPT_OK;
 
 	assert( isWritePtr( contextInfoPtr, sizeof( CONTEXT_INFO ) ) );
@@ -298,11 +336,23 @@ static int sign( INOUT CONTEXT_INFO *contextInfoPtr,
 	assert( isReadPtr( eccParams->inParam1, eccParams->inLen1 ) );
 	assert( isWritePtr( eccParams->outParam, eccParams->outLen ) );
 
+	REQUIRES( sanityCheckPKCInfo( pkcInfo ) );
+	REQUIRES( pkcInfo->domainParams != NULL );
 	REQUIRES( noBytes == sizeof( DLP_PARAMS ) );
 	REQUIRES( eccParams->inParam2 == NULL && \
 			  ( eccParams->inLen2 == 0 || eccParams->inLen2 == -999 ) );
 	REQUIRES( eccParams->outLen >= MIN_CRYPT_OBJECTSIZE && \
 			  eccParams->outLen < MAX_INTLENGTH_SHORT );
+	REQUIRES( encodeDLValuesFunction != NULL );
+	REQUIRES( nLen >= ECCPARAM_MIN_N && nLen <= ECCPARAM_MAX_N );
+
+	/* Perform side-channel attack checks */
+	if( cryptStatusError( \
+			checksumContextData( pkcInfo, CRYPT_ALGO_ECDSA, TRUE ) ) )
+		{
+		DEBUG_DIAG(( "ECDSA key memory corruption detected" ));
+		return( CRYPT_ERROR_FAILED );
+		}
 
 	/* Generate the secret random value k.  During the initial self-test the 
 	   random data pool may not exist yet, and may in fact never exist in a 
@@ -319,20 +369,26 @@ static int sign( INOUT CONTEXT_INFO *contextInfoPtr,
 	if( eccParams->inLen2 == -999 )
 		{
 		status = importBignum( k, ( BYTE * ) kVal, ECDSA_TESTVECTOR_SIZE, 
-							   ECDSA_TESTVECTOR_SIZE, 
+							   ECDSA_TESTVECTOR_SIZE - 1, 
 							   ECDSA_TESTVECTOR_SIZE, NULL,
 							   KEYSIZE_CHECK_NONE );
 		}
 	else
 		{
+
 		/* Generate the random value k from [1...n-1], i.e. a random value 
 		   mod n.  Using a random value of the same length as r would 
 		   produce a slight bias in k that leaks a small amount of the 
 		   private key in each signature.  Because of this we start with a 
 		   value which is DLP_OVERFLOW_SIZE larger than r and then do the 
-		   reduction, eliminating the bias */
-		status = generateBignum( k, BN_num_bits( n ) + \
-									bytesToBits( DLP_OVERFLOW_SIZE ), 0x80, 0 );
+		   reduction, eliminating the bias.
+
+		   We also add (meaning "mix in" rather than strictly 
+		   "arithmetically add") the message hash to k to curtail problems 
+		   in the incredibly unlikely situation that the RNG value repeats */
+		status = generateBignum( k, bytesToBits( nLen ) + \
+									bytesToBits( DLP_OVERFLOW_SIZE ), 0x80, 
+								 0, eccParams->inParam1, eccParams->inLen1 );
 		}
 	if( cryptStatusError( status ) )
 		return( status );
@@ -343,16 +399,16 @@ static int sign( INOUT CONTEXT_INFO *contextInfoPtr,
 		   these measures are actually terribly useful because we're using a 
 		   random exponent each time so the timing information isn't of much
 		   use to an attacker */
-		BN_set_flags( k, BN_FLG_EXP_CONSTTIME );
+		BN_set_flags( k, BN_FLG_CONSTTIME );
 		}
 	CK( BN_mod( k, k, n, 				/* Reduce k to the correct range */
-				pkcInfo->bnCTX ) );
+				&pkcInfo->bnCTX ) );
 	if( bnStatusError( bnStatus ) )
 		return( getBnStatus( bnStatus ) );
 
 	/* Make sure that the result isn't zero (or more generally less than 64
 	   bits).  Admittedly the chances of this are infinitesimally small 
-	   (2^-192, the size of the smallest curve, or less for a value of zero, 
+	   (2^-256, the size of the smallest curve, or less for a value of zero, 
 	   2^-128 for 64 bits) but someone's bound to complain if we don't 
 	   check */
 	ENSURES( BN_num_bytes( k ) > 8 );
@@ -365,26 +421,26 @@ static int sign( INOUT CONTEXT_INFO *contextInfoPtr,
 	/* Compute the point kG.  EC_POINT_mul() extracts the generator G from 
 	   the curve definition (and see the long comment in sigCheck() about 
 	   the peculiarities of this function) */
-	CK( EC_POINT_mul( ecCTX, kg, k, NULL, NULL, pkcInfo->bnCTX ) );	
+	CK( EC_POINT_mul( ecCTX, kg, k, NULL, NULL, &pkcInfo->bnCTX ) );	
 	if( bnStatusError( bnStatus ) )
 		return( getBnStatus( bnStatus ) );
 
 	/* r = kG.x mod G.r (s is a dummy) */
 	CK( EC_POINT_get_affine_coordinates_GFp( ecCTX, kg, x, s, 
-											 pkcInfo->bnCTX ) );
-	CK( BN_mod( r, x, n, pkcInfo->bnCTX ) );
+											 &pkcInfo->bnCTX ) );
+	CK( BN_mod( r, x, n, &pkcInfo->bnCTX ) );
 	if( bnStatusError( bnStatus ) )
 		return( getBnStatus( bnStatus ) );
 
 	/* k = ( k^-1 ) mod n */
-	CKPTR( BN_mod_inverse( k, k, n, pkcInfo->bnCTX ) );
+	CKPTR( BN_mod_inverse( k, k, n, &pkcInfo->bnCTX ) );
 	if( bnStatusError( bnStatus ) )
 		return( getBnStatus( bnStatus ) );
 
 	/* s = k^-1 * ( d * r + e ) mod n */
-	CK( BN_mod_mul( s, &pkcInfo->eccParam_d, r, n, pkcInfo->bnCTX ) );
-	CK( BN_mod_add( s, s, hash, n, pkcInfo->bnCTX ) );
-	CK( BN_mod_mul( s, s, k, n, pkcInfo->bnCTX ) );
+	CK( BN_mod_mul( s, &pkcInfo->eccParam_d, r, n, &pkcInfo->bnCTX ) );
+	CK( BN_mod_add( s, s, hash, n, &pkcInfo->bnCTX ) );
+	CK( BN_mod_mul( s, s, k, n, &pkcInfo->bnCTX ) );
 	if( bnStatusError( bnStatus ) )
 		return( getBnStatus( bnStatus ) );
 
@@ -392,20 +448,29 @@ static int sign( INOUT CONTEXT_INFO *contextInfoPtr,
 	   is checked for the real necessity of this check */
 	ENSURES( !BN_is_zero( r ) && !BN_is_zero( s ) );
 
+	/* More generally, and usefully, check that the values aren't 
+	   suspiciously small */
+	if( BN_num_bytes( r ) < nLen - 16 || BN_num_bytes( s ) < nLen - 16 )
+		return( CRYPT_ERROR_BADDATA );
+
 	/* Encode the result as a DL data block */
-	status = pkcInfo->encodeDLValuesFunction( eccParams->outParam, 
-									eccParams->outLen, &eccParams->outLen, 
-									r, s, eccParams->formatType );
+	status = encodeDLValuesFunction( eccParams->outParam, eccParams->outLen, 
+									 &eccParams->outLen, r, s, 
+									 eccParams->formatType );
 	if( cryptStatusError( status ) )
 		return( status );
 
-	/* Perform side-channel attack checks if necessary */
-	if( ( contextInfoPtr->flags & CONTEXT_FLAG_SIDECHANNELPROTECTION ) && \
-		cryptStatusError( calculateBignumChecksum( pkcInfo, 
-												   CRYPT_ALGO_ECDSA ) ) )
+	/* Perform side-channel attack checks */
+	if( cryptStatusError( \
+			checksumContextData( pkcInfo, CRYPT_ALGO_ECDSA, TRUE ) ) )
 		{
+		if( eccParams->inLen2 != -999 )	/* Don't trigger on self-test */
+			{ DEBUG_DIAG(( "ECDSA key memory corruption detected" )); }
 		return( CRYPT_ERROR_FAILED );
 		}
+
+	ENSURES( sanityCheckPKCInfo( pkcInfo ) );
+
 	return( CRYPT_OK );
 	}
 
@@ -418,12 +483,15 @@ static int sigCheck( INOUT CONTEXT_INFO *contextInfoPtr,
 	{
 	PKC_INFO *pkcInfo = contextInfoPtr->ctxPKC;
 	DLP_PARAMS *eccParams = ( DLP_PARAMS * ) buffer;
-	BIGNUM *n = &pkcInfo->eccParam_n;
+	const PKC_DECODEDLVALUES_FUNCTION decodeDLValuesFunction = \
+					FNPTR_GET( pkcInfo->decodeDLValuesFunction );
+	const ECC_DOMAINPARAMS *domainParams = pkcInfo->domainParams;
+	const BIGNUM *n = &domainParams->n;
 	BIGNUM *qx = &pkcInfo->eccParam_qx, *qy = &pkcInfo->eccParam_qy;
 	BIGNUM *u1 = &pkcInfo->tmp1, *u2 = &pkcInfo->tmp2;
-	BIGNUM *r = &pkcInfo->tmp3, *s = &pkcInfo->tmp4;
+	BIGNUM *r = &pkcInfo->tmp3, *s = &pkcInfo->eccParam_tmp4;
 	EC_GROUP *ecCTX = pkcInfo->ecCTX;
-	EC_POINT *u1gu2q = pkcInfo->tmpPoint, *u2q;
+	EC_POINT *u1gu2q = pkcInfo->tmpPoint, *u2q DUMMY_INIT_PTR;
 	int bnStatus = BN_STATUS, status;
 
 	assert( isWritePtr( contextInfoPtr, sizeof( CONTEXT_INFO ) ) );
@@ -431,14 +499,26 @@ static int sigCheck( INOUT CONTEXT_INFO *contextInfoPtr,
 	assert( isReadPtr( eccParams->inParam1, eccParams->inLen1 ) );
 	assert( isReadPtr( eccParams->inParam2, eccParams->inLen2 ) );
 
+	REQUIRES( sanityCheckPKCInfo( pkcInfo ) );
+	REQUIRES( pkcInfo->domainParams != NULL );
 	REQUIRES( noBytes == sizeof( DLP_PARAMS ) );
 	REQUIRES( eccParams->outParam == NULL && eccParams->outLen == 0 );
+	REQUIRES( decodeDLValuesFunction != NULL );
+
+	/* Perform side-channel attack checks */
+	if( cryptStatusError( \
+			checksumContextData( pkcInfo, CRYPT_ALGO_ECDSA,
+					( contextInfoPtr->flags & CONTEXT_FLAG_ISPUBLICKEY ) ? \
+					FALSE : TRUE ) ) )
+		{
+		DEBUG_DIAG(( "ECDSA key memory corruption detected" ));
+		return( CRYPT_ERROR_FAILED );
+		}
 
 	/* Decode the values from a DL data block and make sure that r and s are
 	   valid, i.e. r, s = [1...n-1] */
-	status = pkcInfo->decodeDLValuesFunction( eccParams->inParam2, 
-											  eccParams->inLen2, r, s, n,
-											  eccParams->formatType );
+	status = decodeDLValuesFunction( eccParams->inParam2, eccParams->inLen2, 
+									 r, s, n, eccParams->formatType );
 	if( cryptStatusError( status ) )
 		return( status );
 
@@ -454,13 +534,13 @@ static int sigCheck( INOUT CONTEXT_INFO *contextInfoPtr,
 		return( getBnStatus( bnStatus ) );
 
 	/* w = s^-1 mod G.r */
-	CKPTR( BN_mod_inverse( u2, s, n, pkcInfo->bnCTX ) );
+	CKPTR( BN_mod_inverse( u2, s, n, &pkcInfo->bnCTX ) );
 
 	/* u1 = ( hash * w ) mod G.r */
-	CK( BN_mod_mul( u1, u1, u2, n, pkcInfo->bnCTX ) );
+	CK( BN_mod_mul( u1, u1, u2, n, &pkcInfo->bnCTX ) );
 
 	/* u2 = ( r * w ) mod G.r */
-	CK( BN_mod_mul( u2, r, u2, n, pkcInfo->bnCTX ) );
+	CK( BN_mod_mul( u2, r, u2, n, &pkcInfo->bnCTX ) );
 
 	/* R = u1*G + u2*Q.  EC_POINT_mul() is a somewhat weird function that 
 	   supports faster ECDSA signature verification by allowing two point 
@@ -470,8 +550,8 @@ static int sigCheck( INOUT CONTEXT_INFO *contextInfoPtr,
 	   "Guide to Elliptic Curve Cryptography") which computes nG + mQ faster 
 	   than if both point multiplications were done separately */
 	CK( EC_POINT_set_affine_coordinates_GFp( ecCTX, u2q, qx, qy, 
-											 pkcInfo->bnCTX ) );
-	CK( EC_POINT_mul( ecCTX, u1gu2q, u1, u2q, u2, pkcInfo->bnCTX ) );
+											 &pkcInfo->bnCTX ) );
+	CK( EC_POINT_mul( ecCTX, u1gu2q, u1, u2q, u2, &pkcInfo->bnCTX ) );
 	if( bnStatusError( bnStatus ) )
 		{
 		EC_POINT_free( u2q );
@@ -483,8 +563,8 @@ static int sigCheck( INOUT CONTEXT_INFO *contextInfoPtr,
 		r' = p((x1, y1)) mod n
 		   = x1 mod n */
 	CK( EC_POINT_get_affine_coordinates_GFp( ecCTX, u1gu2q, u1, u2, 
-											 pkcInfo->bnCTX ) );
-	CK( BN_mod( u1, u1, n, pkcInfo->bnCTX ) );
+											 &pkcInfo->bnCTX ) );
+	CK( BN_mod( u1, u1, n, &pkcInfo->bnCTX ) );
 	if( bnStatusError( bnStatus ) )
 		{
 		EC_POINT_free( u2q );
@@ -498,13 +578,18 @@ static int sigCheck( INOUT CONTEXT_INFO *contextInfoPtr,
 	if( BN_cmp( r, u1 ) )
 		return( CRYPT_ERROR_SIGNATURE );
 
-	/* Perform side-channel attack checks if necessary */
-	if( ( contextInfoPtr->flags & CONTEXT_FLAG_SIDECHANNELPROTECTION ) && \
-		cryptStatusError( calculateBignumChecksum( pkcInfo, 
-												   CRYPT_ALGO_ECDSA ) ) )
+	/* Perform side-channel attack checks */
+	if( cryptStatusError( \
+			checksumContextData( pkcInfo, CRYPT_ALGO_ECDSA,
+					( contextInfoPtr->flags & CONTEXT_FLAG_ISPUBLICKEY ) ? \
+					FALSE : TRUE ) ) )
 		{
+		DEBUG_DIAG(( "ECDSA key memory corruption detected" ));
 		return( CRYPT_ERROR_FAILED );
 		}
+
+	ENSURES( sanityCheckPKCInfo( pkcInfo ) );
+
 	return( status );
 	}
 
@@ -540,6 +625,8 @@ static int initKey( INOUT CONTEXT_INFO *contextInfoPtr,
 
 		contextInfoPtr->flags |= ( eccKey->isPublicKey ) ? \
 					CONTEXT_FLAG_ISPUBLICKEY : CONTEXT_FLAG_ISPRIVATEKEY;
+#if 0	/* We don't allow explicit ECC parameters since all curves are 
+		   predefined */
 		if( eccKey->curveType == CRYPT_ECCCURVE_NONE )
 			{
 			status = importBignum( &pkcInfo->eccParam_p, eccKey->p, 
@@ -575,6 +662,7 @@ static int initKey( INOUT CONTEXT_INFO *contextInfoPtr,
 				return( status );
 			}
 		else
+#endif /* 0 */
 			{
 			if( eccKey->curveType <= CRYPT_ECCCURVE_NONE || \
 				eccKey->curveType >= CRYPT_ECCCURVE_LAST )
@@ -598,6 +686,8 @@ static int initKey( INOUT CONTEXT_INFO *contextInfoPtr,
 		contextInfoPtr->flags |= CONTEXT_FLAG_PBO;
 		if( cryptStatusError( status ) )
 			return( status );
+
+		ENSURES( sanityCheckPKCInfo( pkcInfo ) );
 		}
 #endif /* USE_FIPS140 */
 
@@ -631,7 +721,7 @@ static int generateKey( INOUT CONTEXT_INFO *contextInfoPtr,
 		assert( DEBUG_WARN );
 		status = CRYPT_ERROR_FAILED;
 		}
-	return( status );
+	return( cryptArgError( status ) ? CRYPT_ERROR_FAILED : status );
 	}
 
 /****************************************************************************
@@ -644,7 +734,7 @@ static const CAPABILITY_INFO FAR_BSS capabilityInfo = {
 	CRYPT_ALGO_ECDSA, bitsToBytes( 0 ), "ECDSA", 5,
 	MIN_PKCSIZE_ECC, bitsToBytes( 256 ), CRYPT_MAX_PKCSIZE_ECC,
 	selfTest, getDefaultInfo, NULL, NULL, initKey, generateKey,
-	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 
 	sign, sigCheck
 	};
 

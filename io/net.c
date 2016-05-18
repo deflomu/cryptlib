@@ -1,7 +1,7 @@
 /****************************************************************************
 *																			*
 *						Network Stream I/O Functions						*
-*						Copyright Peter Gutmann 1993-2007					*
+*						Copyright Peter Gutmann 1993-2014					*
 *																			*
 ****************************************************************************/
 
@@ -168,7 +168,8 @@ static int checkForProxy( INOUT NET_STREAM_INFO *netStream,
 						  OUT_BUFFER( proxyUrlMaxLen, *proxyUrlLen ) \
 							char *proxyUrlBuffer, 
 						  IN_LENGTH_DNS const int proxyUrlMaxLen, 
-						  OUT_LENGTH_DNS_Z int *proxyUrlLen )
+						  OUT_LENGTH_BOUNDED_Z( proxyUrlMaxLen ) \
+							int *proxyUrlLen )
 	{
 	MESSAGE_DATA msgData;
 	int status;
@@ -245,6 +246,8 @@ static int openNetworkConnection( INOUT NET_STREAM_INFO *netStream,
 								  IN_BUFFER_OPT( proxyUrlLen ) const char *proxyUrl, 
 								  IN_LENGTH_DNS_Z const int proxyUrlLen )
 	{
+	const STM_TRANSPORTCONNECT_FUNCTION transportConnectFunction = \
+						FNPTR_GET( netStream->transportConnectFunction );
 	URL_INFO urlInfo;
 	char urlBuffer[ MAX_DNS_SIZE + 8 ];
 	const char *url = proxyUrl;
@@ -258,16 +261,24 @@ static int openNetworkConnection( INOUT NET_STREAM_INFO *netStream,
 	REQUIRES( ( proxyUrl == NULL && proxyUrlLen == 0 ) || \
 			  ( proxyUrl != NULL && \
 				proxyUrlLen > 0 && proxyUrlLen <= MAX_DNS_SIZE ) );
+	REQUIRES( transportConnectFunction != NULL );
 
 	/* If we're using an already-active network socket supplied by the
 	   user, there's nothing to do */
 	if( netStream->nFlags & STREAM_NFLAG_USERSOCKET )
 		{
 		/* If it's a dummy open to check parameters that can't be validated
-		   at a higher level pass the info on down to the low-level checking 
-		   routines */
+		   at a higher level then we pass the info on down to the low-level 
+		   checking routines */
 		if( options == NET_OPTION_NETWORKSOCKET_DUMMY )
-			return( netStream->transportCheckFunction( netStream ) );
+			{
+			const STM_TRANSPORTCHECK_FUNCTION transportCheckFunction = \
+						FNPTR_GET( netStream->transportCheckFunction );
+
+			REQUIRES( transportCheckFunction != NULL );
+
+			return( transportCheckFunction( netStream ) );
+			}
 
 		return( CRYPT_OK );
 		}
@@ -275,9 +286,8 @@ static int openNetworkConnection( INOUT NET_STREAM_INFO *netStream,
 	/* If we're not going via a proxy, perform a direct open */
 	if( proxyUrl == NULL )
 		{
-		return( netStream->transportConnectFunction( netStream, netStream->host, 
-													 netStream->hostLen,
-													 netStream->port ) );
+		return( transportConnectFunction( netStream, netStream->host, 
+										  netStream->hostLen, netStream->port ) );
 		}
 
 	/* We're going via a proxy, if the user has specified automatic proxy
@@ -311,9 +321,8 @@ static int openNetworkConnection( INOUT NET_STREAM_INFO *netStream,
 
 	/* Since we're going via a proxy, open the connection to the proxy
 	   rather than directly to the target system.  */
-	return( netStream->transportConnectFunction( netStream, urlInfo.host, 
-												 urlInfo.hostLen, 
-												 urlInfo.port ) );
+	return( transportConnectFunction( netStream, urlInfo.host, 
+									  urlInfo.hostLen, urlInfo.port ) );
 	}
 
 /****************************************************************************
@@ -351,6 +360,8 @@ static int initStream( OUT STREAM *stream,
 	netStream->iTransportSession = CRYPT_ERROR;
 	if( isServer )
 		netStream->nFlags = STREAM_NFLAG_ISSERVER;
+	if( protocol == STREAM_PROTOCOL_UDP )
+		netStream->nFlags |= STREAM_NFLAG_DGRAM;
 
 	/* Set up the stream timeout information.  While we're connecting the 
 	   stream timeout is the connect timeout.  Once we've connected it's set
@@ -403,16 +414,26 @@ static void cleanupStream( INOUT STREAM *stream,
 						   const BOOLEAN cleanupTransport )
 	{
 	NET_STREAM_INFO *netStream = ( NET_STREAM_INFO * ) stream->netStreamInfo;
+	const STM_SANITYCHECK_FUNCTION sanityCheckFunction = \
+							FNPTR_GET( netStream->sanityCheckFunction );
 
 	assert( isWritePtr( stream, sizeof( STREAM ) ) );
 	assert( isWritePtr( netStream, sizeof( NET_STREAM_INFO ) ) );
 
 	REQUIRES_V( netStream != NULL );
-	REQUIRES_V( netStream->sanityCheckFunction( stream ) );
+	REQUIRES_V( sanityCheckFunction != NULL );
+	REQUIRES_V( sanityCheckFunction( stream ) );
 
 	/* Clean up the transport system if necessary */
 	if( cleanupTransport && !( netStream->nFlags & STREAM_NFLAG_USERSOCKET ) )
-		netStream->transportDisconnectFunction( netStream, TRUE );
+		{
+		const STM_TRANSPORTDISCONNECT_FUNCTION transportDisconnectFunction = \
+						FNPTR_GET( netStream->transportDisconnectFunction );
+
+		REQUIRES_V( transportDisconnectFunction != NULL );
+
+		transportDisconnectFunction( netStream, TRUE );
+		}
 
 	/* Clean up stream-related buffers if necessary */
 	zeroise( netStream, sizeof( NET_STREAM_INFO ) + netStream->storageSize );
@@ -540,8 +561,10 @@ static int completeConnect( INOUT STREAM *stream,
 	{
 	const BOOLEAN useTransportBuffering = \
 						( options == NET_OPTION_TRANSPORTSESSION || \
-						  protocol == STREAM_PROTOCOL_TCPIP ) ? \
+						  protocol == STREAM_PROTOCOL_TCP || \
+						  protocol == STREAM_PROTOCOL_UDP ) ? \
 						FALSE : TRUE;
+	STM_TRANSPORTOK_FUNCTION transportOKFunction;
 	void *netStreamData;
 	int netStreamDataSize = 0, status = CRYPT_OK;
 
@@ -586,7 +609,8 @@ static int completeConnect( INOUT STREAM *stream,
 #endif /* USE_HTTP */
 			break;
 
-		case STREAM_PROTOCOL_TCPIP:
+		case STREAM_PROTOCOL_TCP:
+		case STREAM_PROTOCOL_UDP:
 			setStreamLayerDirect( netStreamTemplate );
 			break;
 
@@ -595,17 +619,17 @@ static int completeConnect( INOUT STREAM *stream,
 		}
 	setStreamLayerBuffering( netStreamTemplate, useTransportBuffering );
 
-	ENSURES( netStreamTemplate->sanityCheckFunction != NULL );
-	ENSURES( netStreamTemplate->writeFunction != NULL && \
-			 netStreamTemplate->readFunction != NULL );
-	ENSURES( netStreamTemplate->transportConnectFunction != NULL && \
-			 netStreamTemplate->transportDisconnectFunction != NULL );
-	ENSURES( netStreamTemplate->transportReadFunction != NULL && \
-			 netStreamTemplate->transportWriteFunction != NULL );
-	ENSURES( netStreamTemplate->transportOKFunction != NULL && \
-			 netStreamTemplate->transportCheckFunction != NULL );
-	ENSURES( netStreamTemplate->bufferedTransportReadFunction != NULL && \
-			 netStreamTemplate->bufferedTransportWriteFunction != NULL );
+	ENSURES( FNPTR_GET( netStreamTemplate->sanityCheckFunction ) != NULL );
+	ENSURES( FNPTR_GET( netStreamTemplate->writeFunction ) != NULL && \
+			 FNPTR_GET( netStreamTemplate->readFunction ) != NULL );
+	ENSURES( FNPTR_GET( netStreamTemplate->transportConnectFunction ) != NULL && \
+			 FNPTR_GET( netStreamTemplate->transportDisconnectFunction ) != NULL );
+	ENSURES( FNPTR_GET( netStreamTemplate->transportReadFunction ) != NULL && \
+			 FNPTR_GET( netStreamTemplate->transportWriteFunction ) != NULL );
+	ENSURES( FNPTR_GET( netStreamTemplate->transportOKFunction ) != NULL && \
+			 FNPTR_GET( netStreamTemplate->transportCheckFunction ) != NULL );
+	ENSURES( FNPTR_GET( netStreamTemplate->bufferedTransportReadFunction ) != NULL && \
+			 FNPTR_GET( netStreamTemplate->bufferedTransportWriteFunction ) != NULL );
 	ENSURES( ( netStreamTemplate->nFlags & STREAM_NFLAG_ISSERVER ) || \
 			 ( urlInfo != NULL && \
 			   urlInfo->host != NULL && urlInfo->hostLen != 0 ) || \
@@ -653,8 +677,9 @@ static int completeConnect( INOUT STREAM *stream,
 
 	/* Wait for any async network driver binding to complete and make sure
 	   that the network interface has been initialised */
-	if( !krnlWaitSemaphore( SEMAPHORE_DRIVERBIND ) || \
-		!netStreamTemplate->transportOKFunction() )
+	transportOKFunction = FNPTR_GET( netStreamTemplate->transportOKFunction );
+	ENSURES( transportOKFunction != NULL );
+	if( !krnlWaitSemaphore( SEMAPHORE_DRIVERBIND ) || !transportOKFunction() )
 		{
 		/* Clean up */
 		zeroise( stream, sizeof( STREAM ) );
@@ -781,7 +806,7 @@ int sNetConnect( OUT STREAM *stream,
 	assert( isWritePtr( stream, sizeof( STREAM ) ) );
 	assert( isReadPtr( connectInfo, sizeof( NET_CONNECT_INFO ) ) );
 	assert( isWritePtr( errorInfo, sizeof( ERROR_INFO ) ) );
-	assert( connectInfo->options != NET_OPTION_HOSTNAME || 
+	assert( connectInfo->options != NET_OPTION_HOSTNAME || \
 			( connectInfo->options == NET_OPTION_HOSTNAME && \
 			  isReadPtr( connectInfo->name, connectInfo->nameLength ) && \
 			  ( connectInfo->nameLength > 0 && \
@@ -789,11 +814,12 @@ int sNetConnect( OUT STREAM *stream,
 			  connectInfo->iCryptSession == CRYPT_ERROR && \
 			  connectInfo->networkSocket == CRYPT_ERROR ) );
 
-	REQUIRES( protocol == STREAM_PROTOCOL_TCPIP || \
+	REQUIRES( protocol == STREAM_PROTOCOL_TCP || \
+			  protocol == STREAM_PROTOCOL_UDP || \
 			  protocol == STREAM_PROTOCOL_HTTP );
 	REQUIRES( connectInfo->options > NET_OPTION_NONE && \
 			  connectInfo->options < NET_OPTION_LAST );
-	REQUIRES( connectInfo->options != NET_OPTION_HOSTNAME || 
+	REQUIRES( connectInfo->options != NET_OPTION_HOSTNAME || \
 			  ( connectInfo->options == NET_OPTION_HOSTNAME && \
 			    connectInfo->name != NULL && \
 				( connectInfo->nameLength > 0 && \
@@ -874,12 +900,13 @@ int sNetListen( OUT STREAM *stream,
 	assert( isReadPtr( connectInfo, sizeof( NET_CONNECT_INFO ) ) );
 	assert( isWritePtr( errorInfo, sizeof( ERROR_INFO ) ) );
 
-	REQUIRES( protocol == STREAM_PROTOCOL_TCPIP || \
+	REQUIRES( protocol == STREAM_PROTOCOL_TCP || \
+			  protocol == STREAM_PROTOCOL_UDP || \
 			  protocol == STREAM_PROTOCOL_HTTP );
 	REQUIRES( connectInfo->options == NET_OPTION_HOSTNAME || \
 			  connectInfo->options == NET_OPTION_TRANSPORTSESSION || \
 			  connectInfo->options == NET_OPTION_NETWORKSOCKET );
-	REQUIRES( connectInfo->options != NET_OPTION_HOSTNAME || 
+	REQUIRES( connectInfo->options != NET_OPTION_HOSTNAME || \
 			  ( connectInfo->options == NET_OPTION_HOSTNAME && \
 				connectInfo->iCryptSession == CRYPT_ERROR && \
 				connectInfo->networkSocket == CRYPT_ERROR ) );
@@ -920,27 +947,41 @@ int sNetListen( OUT STREAM *stream,
 							 connectInfo->iUserObject, errorInfo ) );
 	}
 
+#ifdef CONFIG_FUZZ
+
+RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
+int sNetDisconnect( INOUT STREAM *stream )
+	{
+	return( CRYPT_OK );
+	}
+
+#else
+
 RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
 int sNetDisconnect( INOUT STREAM *stream )
 	{
 	NET_STREAM_INFO *netStream = ( NET_STREAM_INFO * ) stream->netStreamInfo;
+	const STM_SANITYCHECK_FUNCTION sanityCheckFunction = \
+							FNPTR_GET( netStream->sanityCheckFunction );
 
 	assert( isWritePtr( stream, sizeof( STREAM ) ) );
 	assert( isWritePtr( netStream, sizeof( NET_STREAM_INFO ) ) );
 
 	REQUIRES_S( netStream != NULL );
-	REQUIRES_S( netStream->sanityCheckFunction( stream ) );
+	REQUIRES_S( sanityCheckFunction != NULL );
+	REQUIRES_S( sanityCheckFunction( stream ) );
 
 	cleanupStream( stream, TRUE );
 
 	return( CRYPT_OK );
 	}
+#endif /* CONFIG_FUZZ */
 
 /* Parse a URL into its various components */
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2 ) ) \
 int sNetParseURL( OUT URL_INFO *urlInfo, 
-				  IN_BUFFER( urlLen ) const char *url, 
+				  IN_BUFFER( urlLen ) const BYTE *url, 
 				  IN_LENGTH_SHORT const int urlLen, 
 				  IN_ENUM_OPT( URL_TYPE ) const URL_TYPE urlTypeHint )
 	{
@@ -956,27 +997,41 @@ int sNetParseURL( OUT URL_INFO *urlInfo,
 
 /* Get extended information about an error status on a network connection */
 
+#ifdef CONFIG_FUZZ
+
+STDC_NONNULL_ARG( ( 1, 2 ) ) \
+void sNetGetErrorInfo( INOUT STREAM *stream, OUT ERROR_INFO *errorInfo )
+	{
+	return;
+	}
+
+#else
+
 STDC_NONNULL_ARG( ( 1, 2 ) ) \
 void sNetGetErrorInfo( INOUT STREAM *stream, OUT ERROR_INFO *errorInfo )
 	{
 	NET_STREAM_INFO *netStream = ( NET_STREAM_INFO * ) stream->netStreamInfo;
+	const STM_SANITYCHECK_FUNCTION sanityCheckFunction = \
+							FNPTR_GET( netStream->sanityCheckFunction );
 
 	assert( isReadPtr( stream, sizeof( STREAM ) ) );
 	assert( isWritePtr( errorInfo, sizeof( ERROR_INFO ) ) );
 
 	REQUIRES_V( netStream != NULL );
-	REQUIRES_V( netStream->sanityCheckFunction( stream ) );
+	REQUIRES_V( sanityCheckFunction != NULL );
+	REQUIRES_V( sanityCheckFunction( stream ) );
 
 	/* Remember the error code and message.  If we're running over a
-	   cryptlib transport session we have to first pull the information up 
-	   from the session, since getSessionErrorInfo() passes through the 
-	   error status from the caller (which in this case is CRYPT_OK since 
-	   we're just using it as a data-fetch function) we don't check the 
-	   return code */
+	   cryptlib transport session then we have to first pull the information 
+	   up from the session.  Since getSessionErrorInfo() passes through the 
+	   error status from the caller (we just insert a dummy CRYPT_ERROR_READ 
+	   since we're only using it as a data-fetch function) we don't check 
+	   the return code */
 	if( netStream->iTransportSession != CRYPT_ERROR )
-		( void ) getSessionErrorInfo( netStream, CRYPT_OK );
+		( void ) getSessionErrorInfo( netStream, CRYPT_ERROR_READ );
 	copyErrorInfo( errorInfo, NETSTREAM_ERRINFO );
 	}
+#endif /* CONFIG_FUZZ */
 
 #else
 
@@ -995,8 +1050,11 @@ int sNetConnect( OUT STREAM *stream,
 				 const NET_CONNECT_INFO *connectInfo, 
 				 INOUT ERROR_INFO *errorInfo )
 	{
+	UNUSED_ARG( connectInfo );
+
 	memset( stream, 0, sizeof( STREAM ) );
 	memset( errorInfo, 0, sizeof( ERROR_INFO ) );
+
 	return( CRYPT_ERROR_OPEN );
 	}
 
@@ -1006,8 +1064,11 @@ int sNetListen( OUT STREAM *stream,
 				const NET_CONNECT_INFO *connectInfo, 
 				INOUT ERROR_INFO *errorInfo )
 	{
+	UNUSED_ARG( connectInfo );
+
 	memset( stream, 0, sizeof( STREAM ) );
 	memset( errorInfo, 0, sizeof( ERROR_INFO ) );
+
 	return( CRYPT_ERROR_OPEN );
 	}
 
@@ -1021,17 +1082,20 @@ int sNetDisconnect( INOUT STREAM *stream )
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1, 2 ) ) \
 int sNetParseURL( INOUT URL_INFO *urlInfo, 
-				  IN_BUFFER( urlLen ) const char *url, 
+				  IN_BUFFER( urlLen ) const BYTE *url, 
 				  IN_LENGTH_SHORT const int urlLen, 
 				  IN_ENUM_OPT( URL_TYPE ) const URL_TYPE urlTypeHint )
 	{
+	UNUSED_ARG( url );
+
 	memset( urlInfo, 0, sizeof( URL_INFO ) );
 
 	return( CRYPT_ERROR_BADDATA );
 	}
 
 STDC_NONNULL_ARG( ( 1, 2 ) ) \
-void sNetGetErrorInfo( INOUT STREAM *stream, OUT ERROR_INFO *errorInfo )
+void sNetGetErrorInfo( INOUT STREAM *stream, 
+					   OUT ERROR_INFO *errorInfo )
 	{
 	UNUSED_ARG( stream );
 

@@ -20,6 +20,8 @@
   #include "session/scorebrd.h"
 #endif /* Compiler-specific includes */
 
+#ifdef USE_SESSIONS
+
 /* The number of entries in the SSL session cache.  Note that when increasing
    the SESSIONCACHE_SIZE value to more than about 256 you need to also change 
    MAX_ALLOC_SIZE in kernel/sec_mem.c to allow the allocation of such large 
@@ -32,8 +34,6 @@
 #endif /* CONFIG_CONSERVE_MEMORY */
 
 static SCOREBOARD_STATE scoreboardInfo;
-
-#ifdef USE_SESSIONS
 
 /****************************************************************************
 *																			*
@@ -61,11 +61,17 @@ static int sessionMessageFunction( INOUT TYPECAST( CONTEXT_INFO * ) \
 	/* Process destroy object messages */
 	if( message == MESSAGE_DESTROY )
 		{
+		const SES_SHUTDOWN_FUNCTION shutdownFunction = \
+					FNPTR_GET( sessionInfoPtr->shutdownFunction );
+
+		REQUIRES( shutdownFunction != NULL );
+
 		/* Shut down the session if required.  Nemo nisi mors */
-		if( sessionInfoPtr->flags & SESSION_ISOPEN )
+		if( sessionInfoPtr->flags & \
+					( SESSION_ISOPEN | SESSION_PARTIALOPEN ) )
 			{
 			sessionInfoPtr->flags |= SESSION_ISCLOSINGDOWN;
-			sessionInfoPtr->shutdownFunction( sessionInfoPtr );
+			shutdownFunction( sessionInfoPtr );
 			}
 
 		/* Clear and free session state information if necessary */
@@ -141,10 +147,28 @@ static int sessionMessageFunction( INOUT TYPECAST( CONTEXT_INFO * ) \
 			if( message == MESSAGE_SETATTRIBUTE || \
 				message == MESSAGE_SETATTRIBUTE_S )
 				{
-				REQUIRES( sessionInfoPtr->setAttributeFunction != NULL );
+				const SES_SETATTRIBUTE_FUNCTION setAttributeFunction = \
+							FNPTR_GET( sessionInfoPtr->setAttributeFunction );
 
-				status = sessionInfoPtr->setAttributeFunction( sessionInfoPtr,
-											messageDataPtr, messageValue );
+				REQUIRES( setAttributeFunction != NULL );
+
+				/* Perform any protocol-specific additional checks if 
+				   necessary */
+				if( FNPTR_ISSET( sessionInfoPtr->checkAttributeFunction ) )
+					{
+					const SES_CHECKATTRIBUTE_FUNCTION checkAttributeFunction = \
+							FNPTR_GET( sessionInfoPtr->checkAttributeFunction );
+
+					REQUIRES( checkAttributeFunction != NULL );
+
+					status = checkAttributeFunction( sessionInfoPtr, 
+												messageDataPtr, messageValue );
+					if( cryptStatusError( status ) )
+						return( status );
+					}
+
+				status = setAttributeFunction( sessionInfoPtr, messageDataPtr, 
+											   messageValue );
 				if( status == CRYPT_ERROR_INITED )
 					{
 					setErrorInfo( sessionInfoPtr, messageValue, 
@@ -154,12 +178,15 @@ static int sessionMessageFunction( INOUT TYPECAST( CONTEXT_INFO * ) \
 				}
 			else
 				{
+				const SES_GETATTRIBUTE_FUNCTION getAttributeFunction = \
+							FNPTR_GET( sessionInfoPtr->getAttributeFunction );
+
 				REQUIRES( message == MESSAGE_GETATTRIBUTE || \
 						  message == MESSAGE_GETATTRIBUTE_S );
-				REQUIRES( sessionInfoPtr->getAttributeFunction != NULL );
+				REQUIRES( getAttributeFunction != NULL );
 
-				status = sessionInfoPtr->getAttributeFunction( sessionInfoPtr,
-											messageDataPtr, messageValue );
+				status = getAttributeFunction( sessionInfoPtr, messageDataPtr, 
+											   messageValue );
 				if( status == CRYPT_ERROR_NOTFOUND )
 					{
 					setErrorInfo( sessionInfoPtr, messageValue, 
@@ -302,7 +329,7 @@ static int openSession( OUT_HANDLE_OPT CRYPT_SESSION *iCryptSession,
 						IN_HANDLE const CRYPT_USER iCryptOwner,
 						IN_ENUM( CRYPT_SESSION ) \
 							const CRYPT_SESSION_TYPE sessionType,
-						OUT_OPT_PTR SESSION_INFO **sessionInfoPtrPtr )
+						OUT_PTR_OPT SESSION_INFO **sessionInfoPtrPtr )
 	{
 	CRYPT_SESSION_TYPE sessionBaseType;
 	SESSION_INFO *sessionInfoPtr;
@@ -474,9 +501,6 @@ static int openSession( OUT_HANDLE_OPT CRYPT_SESSION *iCryptSession,
 		sessionInfoPtr->writeTimeout = \
 			sessionInfoPtr->connectTimeout = CRYPT_ERROR;
 
-	/* Set up any additinal values */
-	sessionInfoPtr->authResponse = CRYPT_UNUSED;
-
 	/* Set up the access information for the session and initialise it */
 	switch( sessionBaseType )
 		{
@@ -532,7 +556,7 @@ static int openSession( OUT_HANDLE_OPT CRYPT_SESSION *iCryptSession,
 			   protocolInfoPtr->maxPacketSize == 0 ) || 
 			 ( !protocolInfoPtr->isReqResp && \
 			   protocolInfoPtr->bufSize >= MIN_BUFFER_SIZE && \
-			   protocolInfoPtr->bufSize < MAX_INTLENGTH && \
+			   protocolInfoPtr->bufSize < MAX_BUFFER_SIZE && \
 			   protocolInfoPtr->sendBufStartOfs >= 5 && 
 			   protocolInfoPtr->sendBufStartOfs < protocolInfoPtr->maxPacketSize && \
 			   protocolInfoPtr->maxPacketSize <= protocolInfoPtr->bufSize ) );
@@ -567,16 +591,16 @@ static int openSession( OUT_HANDLE_OPT CRYPT_SESSION *iCryptSession,
 		return( status );
 
 	/* Check that the handlers are all OK */
-	ENSURES( sessionInfoPtr->connectFunction != NULL );
-	ENSURES( sessionInfoPtr->transactFunction != NULL );
+	ENSURES( FNPTR_GET( sessionInfoPtr->connectFunction ) != NULL );
+	ENSURES( FNPTR_GET( sessionInfoPtr->transactFunction ) != NULL );
 	ENSURES( ( protocolInfoPtr->isReqResp && \
-			   sessionInfoPtr->readHeaderFunction == NULL && \
-			   sessionInfoPtr->processBodyFunction == NULL && \
-			   sessionInfoPtr->preparePacketFunction == NULL ) || \
+			   FNPTR_GET( sessionInfoPtr->readHeaderFunction ) == NULL && \
+			   FNPTR_GET( sessionInfoPtr->processBodyFunction ) == NULL && \
+			   FNPTR_GET( sessionInfoPtr->preparePacketFunction ) == NULL ) || \
 			 ( !protocolInfoPtr->isReqResp && \
-			   sessionInfoPtr->readHeaderFunction != NULL && \
-			   sessionInfoPtr->processBodyFunction != NULL && \
-			   sessionInfoPtr->preparePacketFunction != NULL ) );
+			   FNPTR_GET( sessionInfoPtr->readHeaderFunction ) != NULL && \
+			   FNPTR_GET( sessionInfoPtr->processBodyFunction ) != NULL && \
+			   FNPTR_GET( sessionInfoPtr->preparePacketFunction ) != NULL ) );
 
 	return( CRYPT_OK );
 	}

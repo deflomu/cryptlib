@@ -66,36 +66,42 @@ static const struct {
 
 /* Clean up an object if the PnP operation fails.  This is required when 
    working with devices since we need to explicitly delete anything that
-   was created in the device as well as just deleting the cryptlib object */
+   was created in the device as well as just deleting the cryptlib object.
 
-static void cleanupObject( IN_HANDLE const CRYPT_CONTEXT iPrivateKey, 
-						   IN_ENUM( KEY_TYPE ) const KEY_TYPE keyType )
+   Since the error-handling for this is a bit unclear (it's being called
+   in response to another error so that, for example, the delete-key call
+   could fail because the error that's being responded to resulted in it
+   not being created), and in any case there's not much that we can do to 
+   recover if the delete fail for some other reason, we don't make checking 
+   the return value mandatory */
+
+RETVAL \
+static int cleanupObject( IN_HANDLE const CRYPT_CONTEXT iPrivateKey, 
+						  IN_ENUM( KEY_TYPE ) const KEY_TYPE keyType )
 	{
 	CRYPT_DEVICE iCryptDevice;
 	MESSAGE_KEYMGMT_INFO deletekeyInfo;
 	int status;
 
-	REQUIRES_V( isHandleRangeValid( iPrivateKey ) );
-	REQUIRES_V( keyType > KEY_TYPE_NONE && keyType < KEY_TYPE_LAST );
+	REQUIRES( isHandleRangeValid( iPrivateKey ) );
+	REQUIRES( keyType > KEY_TYPE_NONE && keyType < KEY_TYPE_LAST );
 
 	/* Delete the cryptlib object.  If it's a native object, we're done */
 	status = krnlSendMessage( iPrivateKey, IMESSAGE_GETDEPENDENT,
 							  &iCryptDevice, OBJECT_TYPE_DEVICE );
 	krnlSendNotifier( iPrivateKey, IMESSAGE_DECREFCOUNT );
 	if( cryptStatusError( status ) )
-		return;
+		return( status );
 
 	/* Delete the key from the device.  We set the item type to delete to
 	   public key since the device object will interpret this correctly
-	   to mean that it should also delete the associated private key.  We
-	   don't bother checking the return code since there's not much that
-	   we can do to recover if this fails */
+	   to mean that it should also delete the associated private key */
 	setMessageKeymgmtInfo( &deletekeyInfo, CRYPT_KEYID_NAME, 
 						   keyInfo[ keyType ].label,
 						   keyInfo[ keyType ].labelLength, NULL, 0, 
 						   KEYMGMT_FLAG_NONE );
-	( void ) krnlSendMessage( iCryptDevice, IMESSAGE_KEY_DELETEKEY,
-							  &deletekeyInfo, KEYMGMT_ITEM_PUBLICKEY );
+	return( krnlSendMessage( iCryptDevice, IMESSAGE_KEY_DELETEKEY,
+							 &deletekeyInfo, KEYMGMT_ITEM_PUBLICKEY ) );
 	}
 
 /* Check whether a network connection is still open, used when performing
@@ -515,16 +521,18 @@ static int updateTrustedCerts( IN_HANDLE const CRYPT_HANDLE iCryptHandle,
 
 /* Run a plug-and-play PKI session */
 
-CHECK_RETVAL_BOOL STDC_NONNULL_ARG( ( 1 ) ) \
+CHECK_RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
 int pnpPkiSession( INOUT SESSION_INFO *sessionInfoPtr )
 	{
 	CRYPT_DEVICE iCryptDevice = SYSTEM_OBJECT_HANDLE;
 	CRYPT_CONTEXT iPrivateKey1, iPrivateKey2 ;
-	CRYPT_CERTIFICATE iCertReq, iCACert = DUMMY_INIT;
+	CRYPT_CERTIFICATE iCertReq, iCACert DUMMY_INIT;
 	const ATTRIBUTE_LIST *attributeListPtr;
 	const ATTRIBUTE_LIST *passwordPtr = \
 				findSessionInfo( sessionInfoPtr->attributeList,
 								 CRYPT_SESSINFO_PASSWORD );
+	const SES_TRANSACT_FUNCTION transactFunction = \
+				FNPTR_GET( sessionInfoPtr->transactFunction );
 	const KEY_TYPE keyType = ( sessionInfoPtr->type == CRYPT_SESSION_CMP ) ? \
 							 KEY_TYPE_SIGNATURE : KEY_TYPE_BOTH;
 	const char *storageObjectName = "keyset";
@@ -534,6 +542,7 @@ int pnpPkiSession( INOUT SESSION_INFO *sessionInfoPtr )
 	assert( isWritePtr( sessionInfoPtr, sizeof( SESSION_INFO ) ) );
 
 	REQUIRES( passwordPtr != NULL );
+	REQUIRES( transactFunction != NULL );
 
 	/* If we've been passed a device as the private-key storage location,
 	   create the key in the device instead of as a local object */
@@ -578,7 +587,7 @@ int pnpPkiSession( INOUT SESSION_INFO *sessionInfoPtr )
 		sessionInfoPtr->sessionCMP->requestType = CRYPT_REQUESTTYPE_PKIBOOT;
 		sessionInfoPtr->protocolFlags |= CMP_PFLAG_RETAINCONNECTION;
 		}
-	status = sessionInfoPtr->transactFunction( sessionInfoPtr );
+	status = transactFunction( sessionInfoPtr );
 	if( cryptStatusError( status ) )
 		return( status );
 	if( !isConnectionOpen( sessionInfoPtr ) )
@@ -600,7 +609,7 @@ int pnpPkiSession( INOUT SESSION_INFO *sessionInfoPtr )
 	/* Get the CA/RA certificate from the returned CTL and set it as the 
 	   certificate to use for authenticating server responses */
 	attributeListPtr = findSessionInfo( sessionInfoPtr->attributeList,
-										CRYPT_SESSINFO_SERVER_FINGERPRINT );
+										CRYPT_SESSINFO_SERVER_FINGERPRINT_SHA1 );
 	if( attributeListPtr != NULL )
 		{
 		status = getCACert( &iCACert, sessionInfoPtr->iCertResponse, 
@@ -655,7 +664,7 @@ int pnpPkiSession( INOUT SESSION_INFO *sessionInfoPtr )
 										CRYPT_REQUESTTYPE_INITIALISATION;
 		}
 	sessionInfoPtr->iCertRequest = iCertReq;
-	status = sessionInfoPtr->transactFunction( sessionInfoPtr );
+	status = transactFunction( sessionInfoPtr );
 	krnlSendNotifier( sessionInfoPtr->iCertRequest, IMESSAGE_DECREFCOUNT );
 	sessionInfoPtr->iCertRequest = CRYPT_ERROR;
 	if( cryptStatusError( status ) )
@@ -786,7 +795,7 @@ int pnpPkiSession( INOUT SESSION_INFO *sessionInfoPtr )
 	sessionInfoPtr->iCertRequest = iCertReq;
 	sessionInfoPtr->privateKey = iPrivateKey2;
 	sessionInfoPtr->iAuthOutContext = iPrivateKey1;
-	status = sessionInfoPtr->transactFunction( sessionInfoPtr );
+	status = transactFunction( sessionInfoPtr );
 	sessionInfoPtr->privateKey = CRYPT_ERROR;
 	sessionInfoPtr->iAuthOutContext = CRYPT_ERROR;
 	krnlSendNotifier( sessionInfoPtr->iCertRequest, IMESSAGE_DECREFCOUNT );

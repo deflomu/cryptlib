@@ -1,7 +1,7 @@
 /****************************************************************************
 *																			*
 *							Kernel Message Dispatcher						*
-*						Copyright Peter Gutmann 1997-2007					*
+*						Copyright Peter Gutmann 1997-2012					*
 *																			*
 ****************************************************************************/
 
@@ -20,22 +20,26 @@
 static KERNEL_DATA *krnlData = NULL;
 
 /* The ACL used to check objects passed as message parameters, in this case
-   for cert sign/sig-check messages */
+   for certificate sign/sig-check messages */
 
 static const MESSAGE_ACL FAR_BSS messageParamACLTbl[] = {
-	/* Certs can only be signed by (private-key) PKC contexts */
+	/* Certificates can only be signed by (private-key) PKC contexts */
 	{ MESSAGE_CRT_SIGN,
 	  { ST_CTX_PKC,
 		ST_NONE, ST_NONE } },
 
-	/* Signatures can be checked with a raw PKC context or a cert or cert
-	   chain.  The object being checked can also be checked against a CRL,
-	   against revocation data in a cert store, or against an RTCS or OCSP
-	   responder */
+	/* Signatures can be checked with a raw PKC context or a certificate 
+	   (but specifically not a certificate chain, see the long discussion
+	   in certs/certschk.c for details on this).  The object being checked 
+	   can also be checked against a CRL or CRL-equivalent like an RTCS or
+	   OCSP response, against revocation data in a certificate store, or 
+	   against an RTCS or OCSP responder */
 	{ MESSAGE_CRT_SIGCHECK,
-	  { ST_CTX_PKC | ST_CERT_CERT | ST_CERT_CERTCHAIN | ST_CERT_CRL,
-	    ST_KEYSET_DBMS,
-		ST_SESS_RTCS | ST_SESS_OCSP } },
+	  { ST_CTX_PKC | MKTYPE_CERTIFICATES( ST_CERT_CERT ) | \
+			MKTYPE_CERTREV( ST_CERT_CRL ) | MKTYPE_CERTVAL( ST_CERT_RTCS_RESP ) | \
+			MKTYPE_CERTREV( ST_CERT_OCSP_RESP ),
+	    MKTYPE_DBMS( ST_KEYSET_DBMS ) | MKTYPE_DBMS( ST_KEYSET_DBMS_STORE ),
+		MKTYPE_RTCS( ST_SESS_RTCS ) | MKTYPE_OCSP( ST_SESS_OCSP ) } },
 
 	/* End-of-ACL marker */
 	{ MESSAGE_NONE, { ST_NONE, ST_NONE, ST_NONE } },
@@ -52,8 +56,10 @@ static const MESSAGE_ACL FAR_BSS messageParamACLTbl[] = {
    directly to the appropriate target object).  The following function checks
    that the target object is one of the required types */
 
-CHECK_RETVAL \
-int checkTargetType( IN_HANDLE const int objectHandle, const long targets )
+CHECK_RETVAL STDC_NONNULL_ARG( ( 2 ) ) \
+int checkTargetType( IN_HANDLE const CRYPT_HANDLE originalObjectHandle, 
+					 OUT_HANDLE_OPT CRYPT_HANDLE *targetObjectHandle,
+					 const long targets )
 	{
 	const OBJECT_TYPE target = targets & 0xFF;
 	const OBJECT_TYPE altTarget = targets >> 8;
@@ -61,23 +67,27 @@ int checkTargetType( IN_HANDLE const int objectHandle, const long targets )
 
 	/* Precondition: Source is a valid object, destination(s) are valid
 	   target(s) */
-	REQUIRES( isValidObject( objectHandle ) );
+	REQUIRES( isValidObject( originalObjectHandle ) );
 	REQUIRES( isValidType( target ) );
 	REQUIRES( altTarget == OBJECT_TYPE_NONE || isValidType( altTarget ) );
+
+	/* Clear return value */
+	*targetObjectHandle = CRYPT_ERROR;
 
 	/* Check whether the object matches the required type.  We don't have to
 	   check whether the alternative target has a value or not since the
 	   object can never be a OBJECT_TYPE_NONE */
-	if( !isValidObject( objectHandle ) || \
-		( objectTable[ objectHandle ].type != target && \
-		  objectTable[ objectHandle ].type != altTarget ) )
+	if( !isValidObject( originalObjectHandle ) || \
+		( objectTable[ originalObjectHandle ].type != target && \
+		  objectTable[ originalObjectHandle ].type != altTarget ) )
 		return( CRYPT_ERROR );
 
 	/* Postcondition */
-	ENSURES( objectTable[ objectHandle ].type == target || \
-			 objectTable[ objectHandle ].type == altTarget );
+	ENSURES( objectTable[ originalObjectHandle ].type == target || \
+			 objectTable[ originalObjectHandle ].type == altTarget );
 
-	return( objectHandle );
+	*targetObjectHandle = originalObjectHandle;
+	return( CRYPT_OK );
 	}
 
 /* Find the ACL for a parameter object */
@@ -106,16 +116,22 @@ static const MESSAGE_ACL *findParamACL( IN_MESSAGE const MESSAGE_TYPE message )
 
 /* Wait for an object to become available so that we can use it, with a 
    timeout for blocked objects (dulcis et alta quies placidaeque similima 
-   morti).  This is an internal function which is used when mapping an 
-   object handle to object data, and is never called directly.  As an aid in 
-   identifying objects acting as bottlenecks, we provide a function to warn 
-   about excessive waiting, along with information on the object that was 
-   waited on, in debug mode.  A wait count threshold of 100 is generally 
-   high enough to avoid false positives caused by (for example) network 
-   subsystem delays */
+   morti).  We spin for WAITCOUNT_SLEEP_THRESHOLD turns, then sleep (see
+   the comment in waitForObject() for more on this), and finally bail out
+   once MAX_WAITCOUNT is reached.  
+   
+   This is an internal function that's used when mapping an object handle to 
+   object data, and is never called directly.  
+   
+   As an aid in identifying objects acting as bottlenecks, we provide a 
+   function to warn about excessive waiting, along with information on the 
+   object that was waited on, in debug mode.  A wait count threshold of 
+   100 is generally high enough to avoid false positives caused by (for 
+   example) network subsystem delays */
 
-#define MAX_WAITCOUNT				10000
-#define WAITCOUNT_WARN_THRESHOLD	100
+#define WAITCOUNT_SLEEP_THRESHOLD		100
+#define WAITCOUNT_WARN_THRESHOLD		100
+#define MAX_WAITCOUNT					1000
 
 #if !defined( NDEBUG )
 
@@ -211,12 +227,29 @@ static void getObjectDescription( IN_HANDLE const int objectHandle,
 	}
 
 /* Non thread-safe version of the above that can be used directly in
-   printf() statements.  This is only called for diagnostics during startup/
-   shutdown when there's guaranteed to be only one thread active */
+   printf() statements.  This isn't really that bad, firstly it's mostly 
+   only called for diagnostics during startup/shutdown where there's 
+   guaranteed to be only one thread active, and secondly it uses TLS
+   where possible which means that it'll only really be non-thread-safe on
+   systems that don't have threading anyway (embedded systems that use
+   the tasking model where there's typically only one task) */
+
+#if defined( _MSC_VER )
+  #define THREAD_STORAGE_STATIC		__declspec( thread ) static
+#elif defined( __GNUC__ ) || defined( __clang__ ) || \
+	  defined( __SUNPRO_C ) || defined( __xlc__ )
+  #define THREAD_STORAGE_STATIC		static __thread
+#else
+  #define THREAD_STORAGE_STATIC		static
+#endif /* Compiler-specific TLS */
+#if defined( __APPLE__ )
+  #undef THREAD_STORAGE_STATIC
+  #define THREAD_STORAGE_STATIC		static
+#endif /* OS X */
 
 const char *getObjectDescriptionNT( IN_HANDLE const int objectHandle )
 	{
-	static char buffer[ 128 ];
+	THREAD_STORAGE_STATIC char buffer[ 128 ];
 
 	getObjectDescription( objectHandle, buffer );
 	return( buffer );
@@ -242,7 +275,7 @@ static void waitWarn( IN_HANDLE const int objectHandle,
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 2 ) ) \
 int waitForObject( IN_HANDLE const int objectHandle, 
-				   OUT_PTR OBJECT_INFO **objectInfoPtrPtr )
+				   OUT_PTR_COND OBJECT_INFO **objectInfoPtrPtr )
 	{
 	OBJECT_INFO *objectTable = krnlData->objectTable;
 	const int uniqueID = objectTable[ objectHandle ].uniqueID;
@@ -252,12 +285,40 @@ int waitForObject( IN_HANDLE const int objectHandle,
 	REQUIRES( isValidObject( objectHandle ) );
 	REQUIRES( isInUse( objectHandle ) && !isObjectOwner( objectHandle ) );
 
+	/* Clear return value */
+	*objectInfoPtrPtr = NULL;
+
 	/* While the object is busy, put the thread to sleep (Pauzele lungi si
 	   dese; Cheia marilor succese).  This is the only really portable way
 	   to wait on the resource, which gives up this thread's timeslice to
 	   allow other threads (including the one using the object) to run.
 	   Somewhat better methods methods such as mutexes with timers are
-	   difficult to manage portably across different platforms */
+	   difficult to manage portably across different platforms.
+
+	   Even this can cause problems in some circumstances.  The idea behind 
+	   the mechanism below is that by yielding the CPU, whichever thread 
+	   currently holds the object gets to finish with it and then the 
+	   current thread resumes.  However if there's a thundering-herd 
+	   situation where a dozen other threads are waiting on the lock and 
+	   they've voluntarily yielded the CPU and the scheduler prioritises 
+	   them above other threads because of this then they'll all fight for 
+	   the lock and so the thread that holds the object that they're waiting 
+	   on never gets to run.
+	   
+	   This seems somewhat unlikely, but it's cropped up on multicore 
+	   hyperthreaded Linux machines running large numbers of threads, 
+	   probably because of the thread-scheduling pecularities of HT CPUs
+	   combined with the thread-scheduling peculiarities of Linux (it
+	   doesn't occur on the same systems running Windows or other OSes).  
+	   The problem seems to be that if a thread yields on a CPU other than
+	   the one that holds the resource and no other threads are waiting to
+	   run then it's immediately re-scheduled, because the yield only 
+	   applies to threads on the same CPU.
+
+	   To deal with this we turn the basic thread-timeslice-yield into a 
+	   more aggressive thread-sleep (which really does yield the CPU, even
+	   with the thread-scheduling described above) if 
+	   WAITCOUNT_SLEEP_THRESHOLD yields are exceeded */
 	while( isValidObject( objectHandle ) && \
 		   objectTable[ objectHandle ].uniqueID == uniqueID && \
 		   isInUse( objectHandle ) && waitCount < MAX_WAITCOUNT && \
@@ -267,6 +328,13 @@ int waitForObject( IN_HANDLE const int objectHandle,
 		MUTEX_UNLOCK( objectTable );
 		waitCount++;
 		THREAD_YIELD();
+		if( waitCount > WAITCOUNT_SLEEP_THRESHOLD )
+			{
+			/* We've waited for over WAITCOUNT_SLEEP_THRESHOLD thread
+			   timeslices, explicitly put the thread to sleep rather than 
+			   just yielding its timeslice */
+			THREAD_SLEEP( 1 );
+			}
 		MUTEX_LOCK( objectTable );
 		objectTable = krnlData->objectTable;
 		}
@@ -319,12 +387,13 @@ int waitForObject( IN_HANDLE const int objectHandle,
 /* Find the ultimate target of an object attribute manipulation message by
    walking down the chain of controlling -> dependent objects.  For example
    a message targeted at a device and sent to a certificate would be routed
-   to the cert's dependent object (which would typically be a context).
-   The device message targeted at the context would in turn be routed to the
-   context's dependent device, which is its final destination */
+   to the certificate's dependent object (which would typically be a 
+   context).  The device message targeted at the context would in turn be 
+   routed to the context's dependent device, which is its final destination */
 
-CHECK_RETVAL \
-int findTargetType( IN_HANDLE const int originalObjectHandle, 
+CHECK_RETVAL STDC_NONNULL_ARG( ( 2 ) ) \
+int findTargetType( IN_HANDLE const CRYPT_HANDLE originalObjectHandle, 
+					OUT_HANDLE_OPT CRYPT_HANDLE *targetObjectHandle,
 					const long targets )
 	{
 	const OBJECT_TYPE target = targets & 0xFF;
@@ -340,6 +409,9 @@ int findTargetType( IN_HANDLE const int originalObjectHandle,
 	REQUIRES( isValidType( target ) );
 	REQUIRES( altTarget1 == OBJECT_TYPE_NONE || isValidType( altTarget1 ) );
 	REQUIRES( altTarget2 == OBJECT_TYPE_NONE || isValidType( altTarget2 ) );
+
+	/* Clear return value */
+	*targetObjectHandle = CRYPT_ERROR;
 
 	/* Route the request through any dependent objects as required until we
 	   reach the required target object type.  "And thou shalt make
@@ -386,38 +458,40 @@ int findTargetType( IN_HANDLE const int originalObjectHandle,
 				 objectTable[ originalObjectHandle ].owner == objectHandle );
 		}
 	ENSURES( iterations < 3 );
+	if( !isValidObject( objectHandle ) )
+		return( CRYPT_ARGERROR_OBJECT );
 
-	/* Postcondition: We ran out of options or we reached the target object */
-	ENSURES( iterations < 3 );
-	ENSURES( objectHandle == CRYPT_ERROR || \
-			 ( isValidObject( objectHandle ) && \
-			   ( isSameOwningObject( originalObjectHandle, objectHandle ) || \
-				 objectTable[ originalObjectHandle ].owner == objectHandle ) && \
-			  ( target == type || \
-				( altTarget1 != OBJECT_TYPE_NONE && altTarget1 == type ) || \
-				( altTarget2 != OBJECT_TYPE_NONE && altTarget2 == type ) ) ) );
+	/* Postcondition: We've reached the target object */
+	ENSURES( isValidObject( objectHandle ) && \
+			 ( isSameOwningObject( originalObjectHandle, objectHandle ) || \
+			   objectTable[ originalObjectHandle ].owner == objectHandle ) && \
+			 ( target == type || \
+			   ( altTarget1 != OBJECT_TYPE_NONE && altTarget1 == type ) || \
+			   ( altTarget2 != OBJECT_TYPE_NONE && altTarget2 == type ) ) );
 
-	return( isValidObject( objectHandle ) ? \
-			objectHandle : CRYPT_ARGERROR_OBJECT );
+
+	*targetObjectHandle = objectHandle;
+	return( CRYPT_OK );
 	}
 
 /* Find the ultimate target of a compare message by walking down the chain
    of controlling -> dependent objects.  For example a message targeted at a
-   device and sent to a certificate would be routed to the cert's dependent
-   object (which would typically be a context).  The device message targeted
-   at the context would be routed to the context's dependent device, which
-   is its final destination */
+   device and sent to a certificate would be routed to the certificate's 
+   dependent object (which would typically be a context).  The device 
+   message targeted at the context would be routed to the context's 
+   dependent device, which is its final destination */
 
-CHECK_RETVAL \
-static int routeCompareMessageTarget( IN_HANDLE const int originalObjectHandle,
+CHECK_RETVAL STDC_NONNULL_ARG( ( 2 ) ) \
+static int routeCompareMessageTarget( IN_HANDLE const CRYPT_HANDLE originalObjectHandle, 
+									  OUT_HANDLE_OPT CRYPT_HANDLE *targetObjectHandle,
 									  IN_ENUM( MESSAGE_COMPARE ) \
 											const long messageValue )
 	{
 	OBJECT_TYPE targetType = OBJECT_TYPE_NONE;
-	int objectHandle = originalObjectHandle;
+	int status;
 
 	/* Preconditions */
-	REQUIRES( isValidObject( objectHandle ) );
+	REQUIRES( isValidObject( originalObjectHandle ) );
 	REQUIRES( messageValue == MESSAGE_COMPARE_HASH || \
 			  messageValue == MESSAGE_COMPARE_ICV || \
 			  messageValue == MESSAGE_COMPARE_KEYID || \
@@ -425,10 +499,14 @@ static int routeCompareMessageTarget( IN_HANDLE const int originalObjectHandle,
 			  messageValue == MESSAGE_COMPARE_KEYID_OPENPGP || \
 			  messageValue == MESSAGE_COMPARE_SUBJECT || \
 			  messageValue == MESSAGE_COMPARE_ISSUERANDSERIALNUMBER || \
+			  messageValue == MESSAGE_COMPARE_SUBJECTKEYIDENTIFIER || \
 			  messageValue == MESSAGE_COMPARE_FINGERPRINT_SHA1 || \
 			  messageValue == MESSAGE_COMPARE_FINGERPRINT_SHA2 || \
 			  messageValue == MESSAGE_COMPARE_FINGERPRINT_SHAng || \
 			  messageValue == MESSAGE_COMPARE_CERTOBJ );
+
+	/* Clear return value */
+	*targetObjectHandle = CRYPT_ERROR;
 
 	/* Determine the ultimate target type for the message.  We don't check for
 	   keysets, envelopes and sessions as dependent objects since this never
@@ -445,6 +523,7 @@ static int routeCompareMessageTarget( IN_HANDLE const int originalObjectHandle,
 
 		case MESSAGE_COMPARE_SUBJECT:
 		case MESSAGE_COMPARE_ISSUERANDSERIALNUMBER:
+		case MESSAGE_COMPARE_SUBJECTKEYIDENTIFIER:
 		case MESSAGE_COMPARE_FINGERPRINT_SHA1:
 		case MESSAGE_COMPARE_FINGERPRINT_SHA2:
 		case MESSAGE_COMPARE_FINGERPRINT_SHAng:
@@ -457,14 +536,17 @@ static int routeCompareMessageTarget( IN_HANDLE const int originalObjectHandle,
 		}
 
 	/* Route the message through to the appropriate object */
-	objectHandle = findTargetType( objectHandle, targetType );
+	status = findTargetType( originalObjectHandle, targetObjectHandle, 
+							 targetType );
+	if( cryptStatusError( status ) )
+		return( CRYPT_ARGERROR_OBJECT );
 
-	/* Postcondition */
-	ENSURES( objectHandle == CRYPT_ARGERROR_OBJECT || \
-			 ( isValidObject( objectHandle ) && \
-			   isSameOwningObject( originalObjectHandle, objectHandle ) ) );
+	/* Postcondition: We've found a valid target object */
+	ENSURES( isValidObject( *targetObjectHandle ) && \
+			 isSameOwningObject( originalObjectHandle, \
+								 *targetObjectHandle ) );
 
-	return( objectHandle );
+	return( CRYPT_OK );
 	}
 
 /****************************************************************************
@@ -485,11 +567,13 @@ static int routeCompareMessageTarget( IN_HANDLE const int originalObjectHandle,
 
 typedef enum {
 	PARAMTYPE_NONE_NONE,	/* Data = 0, value = 0 */
+		PARAMTYPE_NONE = PARAMTYPE_NONE_NONE,/* For code analyser */
 	PARAMTYPE_NONE_ANY,		/* Data = 0, value = any */
 	PARAMTYPE_NONE_BOOLEAN,	/* Data = 0, value = boolean */
 	PARAMTYPE_NONE_CHECKTYPE,/* Data = 0, value = check type */
 	PARAMTYPE_DATA_NONE,	/* Data, value = 0 */
 	PARAMTYPE_DATA_ANY,		/* Data, value = any */
+	PARAMTYPE_DATA_ATTRIBUTE,/* Data, value = attribute type */
 	PARAMTYPE_DATA_LENGTH,	/* Data, value >= 0 */
 	PARAMTYPE_DATA_OBJTYPE,	/* Data, value = object type */
 	PARAMTYPE_DATA_MECHTYPE,/* Data, value = mechanism type */
@@ -534,6 +618,21 @@ typedef enum {
 
 /* The handling information, declared in the order in which it's applied */
 
+typedef CHECK_RETVAL STDC_NONNULL_ARG( ( 3 ) ) \
+		int ( *PREDISPATCH_FUNCTION )( IN_HANDLE const int objectHandle,
+									   IN_MESSAGE const MESSAGE_TYPE message,
+									   const void *messageDataPtr,
+									   const int messageValue, const void *auxInfo );
+typedef CHECK_RETVAL STDC_NONNULL_ARG( ( 3 ) ) \
+		int ( *POSTDISPATCH_FUNCTION )( IN_HANDLE const int objectHandle,
+										IN_MESSAGE const MESSAGE_TYPE message,
+										const void *messageDataPtr,
+										const int messageValue, const void *auxInfo );
+typedef CHECK_RETVAL \
+		int ( *INTERNALHANDLER_FUNCTION )( IN_HANDLE const int objectHandle, 
+										   const int arg1, const void *arg2,
+										   const BOOLEAN isInternal );
+
 typedef struct {
 	/* The message type, used for consistency checking */
 	const MESSAGE_TYPE messageType;
@@ -544,7 +643,7 @@ typedef struct {
 	   target is identified in the target.  If the routing function is null,
 	   the message isn't routed */
 	const long routingTarget;			/* Target type if routable */
-	int ( *routingFunction )( const int objectHandle, const long arg );
+	ROUTING_FUNCTION routingFunction;
 
 	/* Object type checking information: Object subtypes for which this
 	   message is valid (for object-type-specific message) */
@@ -558,22 +657,14 @@ typedef struct {
 	/* Pre- and post-message-dispatch handlers.  These perform any additional
 	   checking and processing that may be necessary before and after a
 	   message is dispatched to an object */
-	int ( *preDispatchFunction )( const int objectHandle,
-								  const MESSAGE_TYPE message,
-								  const void *messageDataPtr,
-								  const int messageValue, const void *auxInfo );
-	int ( *postDispatchFunction )( const int objectHandle,
-								   const MESSAGE_TYPE message,
-								   const void *messageDataPtr,
-								   const int messageValue, const void *auxInfo );
+	PREDISPATCH_FUNCTION preDispatchFunction;
+	POSTDISPATCH_FUNCTION postDispatchFunction;
 
 	/* Flags to indicate (potential) special-case handling for this message, 
 	   and the (optional) internal handler function that's used if the 
 	   message is handled directly by the kernel */
 	int flags;							/* Special-case handling flags */
-	int ( *internalHandlerFunction )( const int objectHandle, const int arg1,
-									  const void *arg2,
-									  const BOOLEAN isInternal );
+	INTERNALHANDLER_FUNCTION internalHandlerFunction;
 	} MESSAGE_HANDLING_INFO;
 
 static const MESSAGE_HANDLING_INFO FAR_BSS messageHandlingInfo[] = {
@@ -611,19 +702,19 @@ static const MESSAGE_HANDLING_INFO FAR_BSS messageHandlingInfo[] = {
 	   type, more specific checking is performed using the attribute ACL's */
 	{ MESSAGE_GETATTRIBUTE,			/* Get numeric object attribute */
 	  ROUTE_IMPLICIT, ST_ANY_A, ST_ANY_B, ST_ANY_C, 
-	  PARAMTYPE_DATA_ANY,
+	  PARAMTYPE_DATA_ATTRIBUTE,
 	  PRE_POST_DISPATCH( CheckAttributeAccess, MakeObjectExternal ) },
 	{ MESSAGE_GETATTRIBUTE_S,		/* Get string object attribute */
 	  ROUTE_IMPLICIT, ST_ANY_A, ST_ANY_B, ST_ANY_C, 
-	  PARAMTYPE_DATA_ANY,
+	  PARAMTYPE_DATA_ATTRIBUTE,
 	  PRE_DISPATCH( CheckAttributeAccess ) },
 	{ MESSAGE_SETATTRIBUTE,			/* Set numeric object attribute */
 	  ROUTE_IMPLICIT, ST_ANY_A, ST_ANY_B, ST_ANY_C, 
-	  PARAMTYPE_DATA_ANY,
+	  PARAMTYPE_DATA_ATTRIBUTE,
 	  PRE_POST_DISPATCH( CheckAttributeAccess, ChangeStateOpt ) },
 	{ MESSAGE_SETATTRIBUTE_S,		/* Set string object attribute */
 	  ROUTE_IMPLICIT, ST_ANY_A, ST_ANY_B, ST_ANY_C, 
-	  PARAMTYPE_DATA_ANY,
+	  PARAMTYPE_DATA_ATTRIBUTE,
 	  PRE_POST_DISPATCH( CheckAttributeAccess, ChangeStateOpt ) },
 	{ MESSAGE_DELETEATTRIBUTE,		/* Delete object attribute */
 	  ROUTE_IMPLICIT, ST_CTX_ANY | ST_CERT_ANY, ST_NONE, ST_SESS_ANY | ST_USER_NORMAL | ST_USER_SO,
@@ -683,19 +774,19 @@ static const MESSAGE_HANDLING_INFO FAR_BSS messageHandlingInfo[] = {
 	  PARAMTYPE_NONE_NONE },
 
 	/* Object-type-specific messages: Certificates */
-	{ MESSAGE_CRT_SIGN,				/* Cert: Action = sign cert */
+	{ MESSAGE_CRT_SIGN,				/* Cert: Action = sign certificate */
 	  ROUTE( OBJECT_TYPE_CERTIFICATE ),
 		ST_CERT_ANY_CERT | ST_CERT_ATTRCERT | ST_CERT_CRL | \
 		ST_CERT_OCSP_REQ | ST_CERT_OCSP_RESP, ST_NONE, ST_NONE, 
 	  PARAMTYPE_NONE_ANY,
 	  PRE_POST_DISPATCH( CheckStateParamHandle, ChangeState ) },
-	{ MESSAGE_CRT_SIGCHECK,			/* Cert: Action = check/verify cert */
+	{ MESSAGE_CRT_SIGCHECK,			/* Cert: Action = check/verify certificate */
 	  ROUTE( OBJECT_TYPE_CERTIFICATE ),
 		ST_CERT_ANY_CERT | ST_CERT_ATTRCERT | ST_CERT_CRL | \
 		ST_CERT_RTCS_RESP | ST_CERT_OCSP_RESP, ST_NONE, ST_NONE, 
 	  PARAMTYPE_NONE_ANY,
 	  PRE_DISPATCH( CheckParamHandleOpt ) },
-	{ MESSAGE_CRT_EXPORT,			/* Cert: Export encoded cert data */
+	{ MESSAGE_CRT_EXPORT,			/* Cert: Export encoded certificate data */
 	  ROUTE( OBJECT_TYPE_CERTIFICATE ), ST_CERT_ANY, ST_NONE, ST_NONE, 
 	  PARAMTYPE_DATA_FORMATTYPE,
 	  PRE_DISPATCH( CheckExportAccess ) },
@@ -758,12 +849,12 @@ static const MESSAGE_HANDLING_INFO FAR_BSS messageHandlingInfo[] = {
 	  PRE_DISPATCH( CheckData ) },
 
 	/* Object-type-specific messages: Keysets */
-	{ MESSAGE_KEY_GETKEY,			/* Keyset: Instantiate ctx/cert */
+	{ MESSAGE_KEY_GETKEY,			/* Keyset: Instantiate ctx/certificate */
 	  ROUTE_FIXED_ALT( OBJECT_TYPE_KEYSET, OBJECT_TYPE_DEVICE ),
 		ST_NONE, ST_KEYSET_ANY | ST_DEV_ANY_STD, ST_NONE,
 	  PARAMTYPE_DATA_ITEMTYPE,
 	  PRE_POST_DISPATCH( CheckKeysetAccess, MakeObjectExternal ) },
-	{ MESSAGE_KEY_SETKEY,			/* Keyset: Add ctx/cert */
+	{ MESSAGE_KEY_SETKEY,			/* Keyset: Add ctx/certificate */
 	  ROUTE_FIXED_ALT( OBJECT_TYPE_KEYSET, OBJECT_TYPE_DEVICE ),
 		ST_NONE, ST_KEYSET_ANY | ST_DEV_ANY_STD, ST_NONE,
 	  PARAMTYPE_DATA_ITEMTYPE,
@@ -783,7 +874,7 @@ static const MESSAGE_HANDLING_INFO FAR_BSS messageHandlingInfo[] = {
 		ST_NONE, ST_KEYSET_ANY | ST_DEV_ANY_STD, ST_NONE,
 	  PARAMTYPE_DATA_ITEMTYPE,
 	  PRE_POST_DISPATCH( CheckKeysetAccess, MakeObjectExternal ) },
-	{ MESSAGE_KEY_CERTMGMT,			/* Keyset: Cert management */
+	{ MESSAGE_KEY_CERTMGMT,			/* Keyset: Certificate management */
 	  ROUTE_FIXED( OBJECT_TYPE_KEYSET ),
 		ST_NONE, ST_KEYSET_DBMS_STORE, ST_NONE,
 	  PARAMTYPE_DATA_CERTMGMTTYPE,
@@ -810,7 +901,7 @@ static const MESSAGE_HANDLING_INFO FAR_BSS messageHandlingInfo[] = {
    job of the full ACL checks */
 
 CHECK_RETVAL_BOOL
-static BOOLEAN checkParams( IN_ENUM( PARAMCHECK ) \
+static BOOLEAN checkParams( IN_ENUM( PARAMTYPE ) \
 								const PARAMCHECK_TYPE paramCheck,
 							const void *messageDataPtr, 
 							const int messageValue )
@@ -840,6 +931,13 @@ static BOOLEAN checkParams( IN_ENUM( PARAMCHECK ) \
 
 		case PARAMTYPE_DATA_ANY:
 			return( messageDataPtr != NULL );
+
+		case PARAMTYPE_DATA_ATTRIBUTE:
+			return( messageDataPtr != NULL && \
+					( ( messageValue > CRYPT_ATTRIBUTE_NONE && \
+						messageValue < CRYPT_ATTRIBUTE_LAST ) || \
+					  ( messageValue > CRYPT_IATTRIBUTE_FIRST && \
+					    messageValue < CRYPT_IATTRIBUTE_LAST ) ) );
 
 		case PARAMTYPE_DATA_LENGTH:
 			return( messageDataPtr != NULL && messageValue >= 0 );
@@ -906,6 +1004,12 @@ int initSendMessage( INOUT KERNEL_DATA *krnlDataPtr )
 	int i;
 
 	assert( isWritePtr( krnlDataPtr, sizeof( KERNEL_DATA ) ) );
+
+	/* If we're running a fuzzing build, skip the lengthy self-checks */
+#ifdef CONFIG_FUZZ
+	krnlData = krnlDataPtr;
+	return( CRYPT_OK );
+#endif /* CONFIG_FUZZ */
 
 	/* Perform a consistency check on various things that need to be set
 	   up in a certain way for things to work properly */
@@ -1138,7 +1242,7 @@ static int dequeueMessage( IN_RANGE( 0, MESSAGE_QUEUE_SIZE ) \
 
 /* Get the next message in the queue */
 
-CHECK_RETVAL \
+CHECK_RETVAL_BOOL \
 static BOOLEAN getNextMessage( IN_HANDLE const int objectHandle,
 							   OUT_OPT MESSAGE_QUEUE_DATA *messageQueueInfo )
 	{
@@ -1314,9 +1418,11 @@ static int dispatchMessage( IN_HANDLE const int localObjectHandle,
 							IN_OPT const void *aclPtr )
 	{
 	const MESSAGE_HANDLING_INFO *handlingInfoPtr = \
-									messageQueueData->handlingInfoPtr;
-	const MESSAGE_FUNCTION messageFunction = objectInfoPtr->messageFunction;
-	const MESSAGE_TYPE localMessage = messageQueueData->message & MESSAGE_MASK;
+						messageQueueData->handlingInfoPtr;
+	const MESSAGE_FUNCTION messageFunction = \
+						FNPTR_GET( objectInfoPtr->messageFunction );
+	const MESSAGE_TYPE localMessage = \
+						messageQueueData->message & MESSAGE_MASK;
 	MESSAGE_FUNCTION_EXTINFO messageExtInfo;
 	void *objectPtr = objectInfoPtr->objectPtr;
 	BOOLEAN mayUnlock = FALSE;
@@ -1329,7 +1435,7 @@ static int dispatchMessage( IN_HANDLE const int localObjectHandle,
 	REQUIRES( isValidObject( localObjectHandle ) );
 	REQUIRES( !isInUse( localObjectHandle ) || \
 			  isObjectOwner( localObjectHandle ) );
-	REQUIRES( messageFunction != NULL );
+	ENSURES( messageFunction != NULL );
 
 	/* If there's a pre-dispatch handler present, apply it */
 	if( handlingInfoPtr->preDispatchFunction != NULL )
@@ -1414,6 +1520,53 @@ static int dispatchMessage( IN_HANDLE const int localObjectHandle,
 
 /* Send a message to an object */
 
+RETVAL \
+PARAMCHECK_MESSAGE( MESSAGE_DESTROY, PARAM_NULL, PARAM_IS( 0 ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_INCREFCOUNT, PARAM_NULL, PARAM_IS( 0 ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_DECREFCOUNT, PARAM_NULL, PARAM_IS( 0 ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_GETDEPENDENT, OUT, IN_ENUM( OBJECT_TYPE ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_SETDEPENDENT, IN, IN ) \
+PARAMCHECK_MESSAGE( MESSAGE_CLONE, PARAM_NULL, IN_HANDLE ) \
+PARAMCHECK_MESSAGE( MESSAGE_GETATTRIBUTE, OUT, IN_ATTRIBUTE ) \
+PARAMCHECK_MESSAGE( MESSAGE_GETATTRIBUTE_S, INOUT, IN_ATTRIBUTE ) \
+PARAMCHECK_MESSAGE( MESSAGE_SETATTRIBUTE, IN, IN_ATTRIBUTE ) \
+PARAMCHECK_MESSAGE( MESSAGE_SETATTRIBUTE_S, IN, IN_ATTRIBUTE ) \
+PARAMCHECK_MESSAGE( MESSAGE_DELETEATTRIBUTE, PARAM_NULL, IN_ATTRIBUTE ) \
+PARAMCHECK_MESSAGE( MESSAGE_COMPARE, IN, IN_ENUM( MESSAGE_COMPARE ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_CHECK, PARAM_NULL, IN_ENUM( MESSAGE_CHECK ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_SELFTEST, PARAM_NULL, PARAM_IS( 0 ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_CHANGENOTIFY, PARAM_NULL, PARAM_IS( 0 ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_CTX_ENCRYPT, INOUT, IN_LENGTH ) \
+PARAMCHECK_MESSAGE( MESSAGE_CTX_DECRYPT, INOUT, IN_LENGTH ) \
+PARAMCHECK_MESSAGE( MESSAGE_CTX_SIGN, IN, IN_LENGTH ) \
+PARAMCHECK_MESSAGE( MESSAGE_CTX_SIGCHECK, IN, IN_LENGTH ) \
+PARAMCHECK_MESSAGE( MESSAGE_CTX_HASH, IN, IN_LENGTH_Z ) \
+PARAMCHECK_MESSAGE( MESSAGE_CTX_GENKEY, PARAM_NULL, PARAM_IS( 0 ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_CTX_GENIV, PARAM_NULL, PARAM_IS( 0 ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_CRT_SIGN, PARAM_NULL, IN_HANDLE ) \
+PARAMCHECK_MESSAGE( MESSAGE_CRT_SIGCHECK, PARAM_NULL, IN_HANDLE_OPT ) \
+PARAMCHECK_MESSAGE( MESSAGE_CRT_EXPORT, INOUT, IN_ENUM( CRYPT_CERTFORMAT ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_DEV_QUERYCAPABILITY, OUT, IN_ALGO ) \
+PARAMCHECK_MESSAGE( MESSAGE_DEV_EXPORT, INOUT, IN_ENUM( MECHANISM ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_DEV_IMPORT, INOUT, IN_ENUM( MECHANISM ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_DEV_SIGN, INOUT, IN_ENUM( MECHANISM ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_DEV_SIGCHECK, INOUT, IN_ENUM( MECHANISM ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_DEV_DERIVE, INOUT, IN_ENUM( MECHANISM ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_DEV_KDF, INOUT, IN_ENUM( MECHANISM ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_DEV_CREATEOBJECT, INOUT, IN_ENUM( OBJECT_TYPE ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_DEV_CREATEOBJECT_INDIRECT, INOUT, IN_ENUM( OBJECT_TYPE ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_ENV_PUSHDATA, INOUT, PARAM_IS( 0 ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_ENV_POPDATA, INOUT, PARAM_IS( 0 ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_KEY_GETKEY, INOUT, IN_ENUM( KEYMGMT_ITEM ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_KEY_SETKEY, INOUT, IN_ENUM( KEYMGMT_ITEM ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_KEY_DELETEKEY, INOUT, IN_ENUM( KEYMGMT_ITEM ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_KEY_GETFIRSTCERT, INOUT, IN_ENUM( KEYMGMT_ITEM ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_KEY_GETNEXTCERT, INOUT, IN_ENUM( KEYMGMT_ITEM ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_KEY_CERTMGMT, INOUT, IN_ENUM( CRYPT_CERTACTION ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_USER_USERMGMT, INOUT, IN_ENUM( MESSAGE_USERMGMT ) ) \
+PARAMCHECK_MESSAGE( MESSAGE_USER_TRUSTMGMT, IN, IN_ENUM( MESSAGE_TRUSTMGMT ) ) \
+					/* Actually INOUT for MESSAGE_TRUSTMGMT_GETISSUER, but too \
+					   complex to annotate */ \
 int krnlSendMessage( IN_HANDLE const int objectHandle, 
 					 IN_MESSAGE const MESSAGE_TYPE message,
 					 void *messageDataPtr, const int messageValue )
@@ -1550,14 +1703,15 @@ int krnlSendMessage( IN_HANDLE const int objectHandle,
 	/* Inner precondition now that the outer check has been passed: It's a
 	   valid, accessible object and not a system object that can never be
 	   explicitly destroyed or have its refCount altered */
-	REQUIRES( isValidObject( objectHandle ) );
-	REQUIRES( isInternalMessage || ( !isInternalObject( objectHandle ) && \
-			  checkObjectOwnership( objectTable[ objectHandle ] ) ) );
-	REQUIRES( fullObjectCheck( objectHandle, message ) );
-	REQUIRES( objectHandle >= NO_SYSTEM_OBJECTS || \
-			 ( localMessage != MESSAGE_DESTROY && \
-			   localMessage != MESSAGE_DECREFCOUNT && \
-			   localMessage != MESSAGE_INCREFCOUNT ) );
+	REQUIRES_MUTEX( isValidObject( objectHandle ), objectTable );
+	REQUIRES_MUTEX( isInternalMessage || ( !isInternalObject( objectHandle ) && \
+					checkObjectOwnership( objectTable[ objectHandle ] ) ), \
+					objectTable );
+	REQUIRES_MUTEX( fullObjectCheck( objectHandle, message ), objectTable );
+	REQUIRES_MUTEX( objectHandle >= NO_SYSTEM_OBJECTS || \
+					( localMessage != MESSAGE_DESTROY && \
+					  localMessage != MESSAGE_DECREFCOUNT && \
+					  localMessage != MESSAGE_INCREFCOUNT ), objectTable );
 
 	/* If this message is routable, find its target object */
 	if( handlingInfoPtr->routingFunction != NULL )
@@ -1565,21 +1719,25 @@ int krnlSendMessage( IN_HANDLE const int objectHandle,
 		/* If it's implicitly routed, route it based on the attribute type */
 		if( isImplicitRouting( handlingInfoPtr->routingTarget ) )
 			{
-			REQUIRES( attributeACL != NULL );
+			REQUIRES_MUTEX( attributeACL != NULL, objectTable );
 
 			if( attributeACL->routingFunction != NULL )
-				localObjectHandle = attributeACL->routingFunction( objectHandle,
+				{
+				status = attributeACL->routingFunction( objectHandle,
+											&localObjectHandle,
 											attributeACL->routingTarget );
+				}
 			}
 		else
 			{
 			/* It's explicitly or directly routed, route it based on the
 			   message type or fixed-target type */
-			localObjectHandle = handlingInfoPtr->routingFunction( objectHandle,
+			status = handlingInfoPtr->routingFunction( objectHandle,
+											&localObjectHandle,
 						isExplicitRouting( handlingInfoPtr->routingTarget ) ? \
 						messageValue : handlingInfoPtr->routingTarget );
 			}
-		if( cryptStatusError( localObjectHandle ) )
+		if( cryptStatusError( status ) )
 			{
 			MUTEX_UNLOCK( objectTable );
 			return( CRYPT_ARGERROR_OBJECT );
@@ -1587,7 +1745,7 @@ int krnlSendMessage( IN_HANDLE const int objectHandle,
 		}
 
 	/* Inner precodition: It's a valid destination object */
-	REQUIRES( isValidObject( localObjectHandle ) );
+	REQUIRES_MUTEX( isValidObject( localObjectHandle ), objectTable );
 
 	/* Sanity-check the message routing */
 	if( !isValidObject( localObjectHandle ) )
@@ -1610,12 +1768,13 @@ int krnlSendMessage( IN_HANDLE const int objectHandle,
 		}
 
 	/* Inner precondition: The message is valid for this object subtype */
-	REQUIRES( isValidSubtype( handlingInfoPtr->subTypeA, \
-							  objectInfoPtr->subType ) || \
-			  isValidSubtype( handlingInfoPtr->subTypeB, \
-							  objectInfoPtr->subType ) || \
-			  isValidSubtype( handlingInfoPtr->subTypeC, \
-							  objectInfoPtr->subType ) );
+	REQUIRES_MUTEX( isValidSubtype( handlingInfoPtr->subTypeA, \
+									objectInfoPtr->subType ) || \
+					isValidSubtype( handlingInfoPtr->subTypeB, \
+									objectInfoPtr->subType ) || \
+					isValidSubtype( handlingInfoPtr->subTypeC, \
+									objectInfoPtr->subType ), \
+					objectTable );
 
 	/* If this message is processed internally, handle it now.  These
 	   messages aren't affected by the object's state so they're always
@@ -1680,7 +1839,8 @@ int krnlSendMessage( IN_HANDLE const int objectHandle,
 			}
 
 		/* Inner precondition: The object is in a valid state */
-		REQUIRES( !isInvalidObjectState( localObjectHandle ) );
+		REQUIRES_MUTEX( !isInvalidObjectState( localObjectHandle ), \
+						objectTable );
 
 		/* Dispatch the message to the object */
 		status = dispatchMessage( localObjectHandle, &messageQueueData,
@@ -1710,8 +1870,9 @@ int krnlSendMessage( IN_HANDLE const int objectHandle,
 
 	/* Inner precondition: The object is in use or it's a destroy object
 	   message, we have to enqueue it */
-	REQUIRES( isInUse( localObjectHandle ) || \
-			  localMessage == MESSAGE_DESTROY );
+	REQUIRES_MUTEX( isInUse( localObjectHandle ) || \
+					localMessage == MESSAGE_DESTROY, \
+					objectTable );
 
 	/* If we're stuck in a loop processing recursive messages, bail out.
 	   This would happen automatically anyway once we fill the message queue,
@@ -1755,7 +1916,7 @@ int krnlSendMessage( IN_HANDLE const int objectHandle,
 		   a destroy-object message.  What we therefore enqueue is a
 		   destroy-object message, but with the messageValue parameter set
 		   to TRUE to indicate that it's a converted destroy message */
-		REQUIRES( localMessage == MESSAGE_DESTROY );
+		REQUIRES_MUTEX( localMessage == MESSAGE_DESTROY, objectTable );
 
 		status = enqueueMessage( localObjectHandle,
 								 &messageHandlingInfo[ MESSAGE_DESTROY ],
@@ -1832,8 +1993,9 @@ int krnlSendMessage( IN_HANDLE const int objectHandle,
 		/* Inner precondition: The object is in a valid state or it's a
 		   destroy message that was converted from a different message 
 		   type */
-		REQUIRES( !isInvalidObjectState( localObjectHandle ) || \
-				  ( isDestroy && ( enqueuedMessageData.messageValue == TRUE ) ) );
+		REQUIRES_MUTEX( !isInvalidObjectState( localObjectHandle ) || \
+						( isDestroy && ( enqueuedMessageData.messageValue == TRUE ) ), \
+						objectTable );
 
 		/* Dispatch the message to the object */
 		status = dispatchMessage( localObjectHandle, &enqueuedMessageData,
@@ -1851,7 +2013,7 @@ int krnlSendMessage( IN_HANDLE const int objectHandle,
 			int destroyStatus;	/* Preserve original status value */
 
 			destroyStatus = destroyObjectData( localObjectHandle );
-			ENSURES( cryptStatusOK( destroyStatus ) );
+			ENSURES_MUTEX( cryptStatusOK( destroyStatus ), objectTable );
 			dequeueAllMessages( localObjectHandle );
 			}
 		else
@@ -1867,7 +2029,8 @@ int krnlSendMessage( IN_HANDLE const int objectHandle,
 				}
 			}
 		}
-	ENSURES( iterationCount < FAILSAFE_ITERATIONS_LARGE );
+	ENSURES_MUTEX( iterationCount < FAILSAFE_ITERATIONS_LARGE, \
+				   objectTable );
 
 	/* Unlock the object table to allow access by other threads */
 	MUTEX_UNLOCK( objectTable );

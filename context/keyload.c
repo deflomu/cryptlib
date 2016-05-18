@@ -33,7 +33,6 @@ int attributeToFormatType( IN_ATTRIBUTE const CRYPT_ATTRIBUTE_TYPE attribute,
 	{
 	static const MAP_TABLE attributeMapTbl[] = {
 		{ CRYPT_IATTRIBUTE_KEY_SSH, KEYFORMAT_SSH },
-		{ CRYPT_IATTRIBUTE_KEY_SSH1,  KEYFORMAT_SSH1 },
 		{ CRYPT_IATTRIBUTE_KEY_SSL, KEYFORMAT_SSL },
 		{ CRYPT_IATTRIBUTE_KEY_PGP, KEYFORMAT_PGP },
 		{ CRYPT_IATTRIBUTE_KEY_PGP_PARTIAL, KEYFORMAT_PGP },
@@ -97,44 +96,38 @@ int initGenericParams( INOUT CONTEXT_INFO *contextInfoPtr,
 			switch( dataLength )
 				{
 				case CRYPT_MODE_ECB:
-					contextInfoPtr->encryptFunction = \
-							capabilityInfoPtr->encryptFunction;
-					contextInfoPtr->decryptFunction = \
-							capabilityInfoPtr->decryptFunction;
+					FNPTR_SET( contextInfoPtr->encryptFunction,
+							   capabilityInfoPtr->encryptFunction );
+					FNPTR_SET( contextInfoPtr->decryptFunction, 
+							   capabilityInfoPtr->decryptFunction );
 					break;
 				case CRYPT_MODE_CBC:
-					contextInfoPtr->encryptFunction = \
-							capabilityInfoPtr->encryptCBCFunction;
-					contextInfoPtr->decryptFunction = \
-							capabilityInfoPtr->decryptCBCFunction;
+					FNPTR_SET( contextInfoPtr->encryptFunction,
+							   capabilityInfoPtr->encryptCBCFunction );
+					FNPTR_SET( contextInfoPtr->decryptFunction,
+							   capabilityInfoPtr->decryptCBCFunction );
 					break;
 				case CRYPT_MODE_CFB:
-					contextInfoPtr->encryptFunction = \
-							capabilityInfoPtr->encryptCFBFunction;
-					contextInfoPtr->decryptFunction = \
-							capabilityInfoPtr->decryptCFBFunction;
-					break;
-				case CRYPT_MODE_OFB:
-					contextInfoPtr->encryptFunction = \
-							capabilityInfoPtr->encryptOFBFunction;
-					contextInfoPtr->decryptFunction = \
-							capabilityInfoPtr->decryptOFBFunction;
+					FNPTR_SET( contextInfoPtr->encryptFunction,
+							   capabilityInfoPtr->encryptCFBFunction );
+					FNPTR_SET( contextInfoPtr->decryptFunction,
+							   capabilityInfoPtr->decryptCFBFunction );
 					break;
 				case CRYPT_MODE_GCM:
-					contextInfoPtr->encryptFunction = \
-							capabilityInfoPtr->encryptGCMFunction;
-					contextInfoPtr->decryptFunction = \
-							capabilityInfoPtr->decryptGCMFunction;
+					FNPTR_SET( contextInfoPtr->encryptFunction,
+							   capabilityInfoPtr->encryptGCMFunction );
+					FNPTR_SET( contextInfoPtr->decryptFunction,
+							   capabilityInfoPtr->decryptGCMFunction );
 					break;
 				default:
 					retIntError();
 				}
-			ENSURES( ( contextInfoPtr->encryptFunction == NULL && \
-					   contextInfoPtr->decryptFunction == NULL ) || \
-					 ( contextInfoPtr->encryptFunction != NULL && \
-					   contextInfoPtr->decryptFunction != NULL ) );
-			if( contextInfoPtr->encryptFunction == NULL || \
-				contextInfoPtr->decryptFunction == NULL )
+			ENSURES( ( FNPTR_GET( contextInfoPtr->encryptFunction ) == NULL && \
+					   FNPTR_GET( contextInfoPtr->decryptFunction ) == NULL ) || \
+					 ( FNPTR_GET( contextInfoPtr->encryptFunction ) != NULL && \
+					   FNPTR_GET( contextInfoPtr->decryptFunction ) != NULL ) );
+			if( FNPTR_GET( contextInfoPtr->encryptFunction ) == NULL || \
+				FNPTR_GET( contextInfoPtr->decryptFunction ) == NULL )
 				{
 				setErrorInfo( contextInfoPtr, CRYPT_CTXINFO_MODE, 
 							  CRYPT_ERRTYPE_ATTR_PRESENT );
@@ -172,7 +165,7 @@ int initGenericParams( INOUT CONTEXT_INFO *contextInfoPtr,
    job of the higher-level code to ensure that the lower-level routines get 
    fed at least approximately valid input */
 
-#ifndef USE_FIPS140
+#ifndef USE_FIPS140 
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 2 ) ) \
 static int checkPKCparams( IN_ALGO const CRYPT_ALGO_TYPE cryptAlgo, 
@@ -380,7 +373,7 @@ static int checkPKCparams( IN_ALGO const CRYPT_ALGO_TYPE cryptAlgo,
 		return( CRYPT_ARGERROR_STR1 );
 	return( CRYPT_OK );
 	}
-#endif /* USE_FIPS140 */
+#endif /* !USE_FIPS140 */
 
 /****************************************************************************
 *																			*
@@ -432,9 +425,8 @@ static int loadKeyPKCFunction( INOUT CONTEXT_INFO *contextInfoPtr,
 			     have been read from encoded X.509/SSH/SSL/PGP data straight
 				 into the context bignums */
 
-#ifndef USE_FIPS140
-	/* If we're loading from externally-supplied parameters, make sure that 
-	   the parameters make sense */
+#ifndef USE_FIPS140 
+	/* Make sure that the parameters make sense */
 	if( key != NULL )
 		{
 		status = checkPKCparams( capabilityInfoPtr->cryptAlgo, key );
@@ -442,7 +434,7 @@ static int loadKeyPKCFunction( INOUT CONTEXT_INFO *contextInfoPtr,
 			return( status );
 		contextInfoPtr->flags |= 0x08;	/* Tell lib_kg to check params too */
 		}
-#endif /* USE_FIPS140 */
+#endif /* !USE_FIPS140 */
 
 	/* Load the keying info */
 	status = capabilityInfoPtr->initKeyFunction( contextInfoPtr, key, 
@@ -517,14 +509,10 @@ int setEncodedKey( INOUT CONTEXT_INFO *contextInfoPtr,
 				   IN_BUFFER( keyDataLen ) const void *keyData, 
 				   IN_LENGTH_SHORT const int keyDataLen )
 	{
-	static const int actionFlags = \
-		MK_ACTION_PERM( MESSAGE_CTX_SIGCHECK, ACTION_PERM_NONE_EXTERNAL ) | \
-		MK_ACTION_PERM( MESSAGE_CTX_ENCRYPT, ACTION_PERM_NONE_EXTERNAL );
-	static const int actionFlagsDH = ACTION_PERM_NONE_EXTERNAL_ALL;
-	static const int actionFlagsPGP = \
-		MK_ACTION_PERM( MESSAGE_CTX_SIGCHECK, ACTION_PERM_ALL ) | \
-		MK_ACTION_PERM( MESSAGE_CTX_ENCRYPT, ACTION_PERM_ALL );
-	const CAPABILITY_INFO *capabilityInfoPtr = contextInfoPtr->capabilityInfo;
+	const PKC_CALCULATEKEYID_FUNCTION calculateKeyIDFunction = \
+				FNPTR_GET( contextInfoPtr->ctxPKC->calculateKeyIDFunction );
+	const PKC_READKEY_FUNCTION readPublicKeyFunction = \
+					FNPTR_GET( contextInfoPtr->ctxPKC->readPublicKeyFunction );
 	STREAM stream;
 	KEYFORMAT_TYPE formatType;
 	int status;
@@ -538,12 +526,13 @@ int setEncodedKey( INOUT CONTEXT_INFO *contextInfoPtr,
 	REQUIRES( keyType == CRYPT_IATTRIBUTE_KEY_SPKI || \
 			  keyType == CRYPT_IATTRIBUTE_KEY_PGP || \
 			  keyType == CRYPT_IATTRIBUTE_KEY_SSH || \
-			  keyType == CRYPT_IATTRIBUTE_KEY_SSH1 || \
 			  keyType == CRYPT_IATTRIBUTE_KEY_SSL || \
 			  keyType == CRYPT_IATTRIBUTE_KEY_SPKI_PARTIAL || \
 			  keyType == CRYPT_IATTRIBUTE_KEY_PGP_PARTIAL );
 	REQUIRES( keyDataLen >= 2 && keyDataLen < MAX_INTLENGTH_SHORT );
 			  /* Can be very short in the case of ECC curve IDs */
+	REQUIRES( calculateKeyIDFunction != NULL );
+	REQUIRES( readPublicKeyFunction != NULL );
 
 	/* If the keys are held externally (e.g. in a crypto device), copy the 
 	   SubjectPublicKeyInfo data in and set up any other information that we 
@@ -561,7 +550,7 @@ int setEncodedKey( INOUT CONTEXT_INFO *contextInfoPtr,
 			return( CRYPT_ERROR_MEMORY );
 		memcpy( contextInfoPtr->ctxPKC->publicKeyInfo, keyData, keyDataLen );
 		contextInfoPtr->ctxPKC->publicKeyInfoSize = keyDataLen;
-		return( contextInfoPtr->ctxPKC->calculateKeyIDFunction( contextInfoPtr ) );
+		return( calculateKeyIDFunction( contextInfoPtr ) );
 		}
 
 	/* Read the appropriately-formatted key data into the context, applying 
@@ -570,8 +559,7 @@ int setEncodedKey( INOUT CONTEXT_INFO *contextInfoPtr,
 	if( cryptStatusError( status ) )
 		return( status );
 	sMemConnect( &stream, keyData, keyDataLen );
-	status = contextInfoPtr->ctxPKC->readPublicKeyFunction( &stream,
-											contextInfoPtr, formatType );
+	status = readPublicKeyFunction( &stream, contextInfoPtr, formatType );
 	sMemDisconnect( &stream );
 	if( cryptStatusError( status ) )
 		return( status );
@@ -581,12 +569,43 @@ int setEncodedKey( INOUT CONTEXT_INFO *contextInfoPtr,
 	   more to do at this point and we're done */
 	if( keyType == CRYPT_IATTRIBUTE_KEY_SPKI_PARTIAL || \
 		keyType == CRYPT_IATTRIBUTE_KEY_PGP_PARTIAL )
-		return( contextInfoPtr->ctxPKC->calculateKeyIDFunction( contextInfoPtr ) );
+		return( calculateKeyIDFunction( contextInfoPtr ) );
+
+	/* Complete the key load using the internally-stored key components */
+	return( completeKeyLoad( contextInfoPtr, 
+				( keyType == CRYPT_IATTRIBUTE_KEY_PGP ) ? TRUE : FALSE ) );
+	}
+
+/* Complete the load process for a key that was loaded with setEncodedKey() 
+   or by setting DLP/ECDLP domain parameters */
+
+CHECK_RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
+int completeKeyLoad( INOUT CONTEXT_INFO *contextInfoPtr, 
+					 const BOOLEAN isPGPkey )
+	{
+	static const int actionFlags = \
+		MK_ACTION_PERM( MESSAGE_CTX_SIGCHECK, ACTION_PERM_NONE_EXTERNAL ) | \
+		MK_ACTION_PERM( MESSAGE_CTX_ENCRYPT, ACTION_PERM_NONE_EXTERNAL );
+	static const int actionFlagsDH = ACTION_PERM_NONE_EXTERNAL_ALL;
+	static const int actionFlagsPGP = \
+		MK_ACTION_PERM( MESSAGE_CTX_SIGCHECK, ACTION_PERM_ALL ) | \
+		MK_ACTION_PERM( MESSAGE_CTX_ENCRYPT, ACTION_PERM_ALL );
+	const CAPABILITY_INFO *capabilityInfoPtr = contextInfoPtr->capabilityInfo;
+	const PKC_CALCULATEKEYID_FUNCTION calculateKeyIDFunction = \
+				FNPTR_GET( contextInfoPtr->ctxPKC->calculateKeyIDFunction );
+	const CTX_LOADKEY_FUNCTION loadKeyFunction = \
+				FNPTR_GET( contextInfoPtr->loadKeyFunction );
+	int status;
+
+	assert( isWritePtr( contextInfoPtr, sizeof( CONTEXT_INFO ) ) );
+
+	REQUIRES( calculateKeyIDFunction != NULL );
+	REQUIRES( loadKeyFunction != NULL );
 
 	/* Perform an internal load that uses the key component values that 
 	   we've just read into the context */
 	contextInfoPtr->flags |= CONTEXT_FLAG_ISPUBLICKEY;
-	status = contextInfoPtr->loadKeyFunction( contextInfoPtr, NULL, 0 );
+	status = loadKeyFunction( contextInfoPtr, NULL, 0 );
 	if( cryptStatusError( status ) )
 		{
 		/* Map the status to a more appropriate code if necessary */
@@ -603,15 +622,14 @@ int setEncodedKey( INOUT CONTEXT_INFO *contextInfoPtr,
 	   keys read from certificates we  allow internal usage only */
 	status = krnlSendMessage( contextInfoPtr->objectHandle,
 						IMESSAGE_SETATTRIBUTE, 
-						( keyType == CRYPT_IATTRIBUTE_KEY_PGP ) ? \
-							( MESSAGE_CAST ) &actionFlagsPGP : \
+						isPGPkey ? ( MESSAGE_CAST ) &actionFlagsPGP : \
 						( isKeyxAlgo( capabilityInfoPtr->cryptAlgo ) ) ? \
 							( MESSAGE_CAST ) &actionFlagsDH : \
 							( MESSAGE_CAST ) &actionFlags,
 						CRYPT_IATTRIBUTE_ACTIONPERMS );
 	if( cryptStatusError( status ) )
 		return( status );
-	return( contextInfoPtr->ctxPKC->calculateKeyIDFunction( contextInfoPtr ) );
+	return( calculateKeyIDFunction( contextInfoPtr ) );
 	}
 
 /* Load the components of a composite PKC key into a context */
@@ -627,6 +645,10 @@ int setKeyComponents( INOUT CONTEXT_INFO *contextInfoPtr,
 		MK_ACTION_PERM( MESSAGE_CTX_SIGCHECK, ACTION_PERM_ALL ) | \
 		MK_ACTION_PERM( MESSAGE_CTX_ENCRYPT, ACTION_PERM_ALL );
 	const CAPABILITY_INFO *capabilityInfoPtr = contextInfoPtr->capabilityInfo;
+	const PKC_CALCULATEKEYID_FUNCTION calculateKeyIDFunction = \
+				FNPTR_GET( contextInfoPtr->ctxPKC->calculateKeyIDFunction );
+	const CTX_LOADKEY_FUNCTION loadKeyFunction = \
+				FNPTR_GET( contextInfoPtr->loadKeyFunction );
 	BOOLEAN isPublicKey;
 	int status;
 
@@ -638,6 +660,8 @@ int setKeyComponents( INOUT CONTEXT_INFO *contextInfoPtr,
 	REQUIRES( keyDataLen == sizeof( CRYPT_PKCINFO_RSA ) || \
 			  keyDataLen == sizeof( CRYPT_PKCINFO_DLP ) || \
 			  keyDataLen == sizeof( CRYPT_PKCINFO_ECC ) );
+	REQUIRES( calculateKeyIDFunction != NULL );
+	REQUIRES( loadKeyFunction != NULL );
 
 	/* If it's a private key we need to have a key label set before we can 
 	   continue.  The checking for this is a bit complex because at this
@@ -661,8 +685,7 @@ int setKeyComponents( INOUT CONTEXT_INFO *contextInfoPtr,
 		return( CRYPT_ERROR_NOTINITED );
 
 	/* Load the key components into the context */
-	status = contextInfoPtr->loadKeyFunction( contextInfoPtr, keyData, 
-											  keyDataLen );
+	status = loadKeyFunction( contextInfoPtr, keyData, keyDataLen );
 	if( cryptStatusError( status ) )
 		return( status );
 	contextInfoPtr->flags |= CONTEXT_FLAG_KEY_SET | CONTEXT_FLAG_PBO;
@@ -681,7 +704,7 @@ int setKeyComponents( INOUT CONTEXT_INFO *contextInfoPtr,
 			return( status );
 		}
 
-	return( contextInfoPtr->ctxPKC->calculateKeyIDFunction( contextInfoPtr ) );
+	return( calculateKeyIDFunction( contextInfoPtr ) );
 	}
 #endif /* !USE_FIPS140 */
 
@@ -697,12 +720,15 @@ CHECK_RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
 static int generateKeyConvFunction( INOUT CONTEXT_INFO *contextInfoPtr )
 	{
 	const CAPABILITY_INFO *capabilityInfoPtr = contextInfoPtr->capabilityInfo;
+	const CTX_LOADKEY_FUNCTION loadKeyFunction = \
+							FNPTR_GET( contextInfoPtr->loadKeyFunction );
 	MESSAGE_DATA msgData;
 	int keyLength = contextInfoPtr->ctxConv->userKeyLength, status;
 
 	assert( isWritePtr( contextInfoPtr, sizeof( CONTEXT_INFO ) ) );
 
 	REQUIRES( contextInfoPtr->type == CONTEXT_CONV );
+	REQUIRES( loadKeyFunction != NULL );
 
 	/* If there's no key size specified, use the default length */
 	if( keyLength <= 0 )
@@ -728,20 +754,23 @@ static int generateKeyConvFunction( INOUT CONTEXT_INFO *contextInfoPtr )
 							  &msgData, CRYPT_IATTRIBUTE_RANDOM );
 	if( cryptStatusError( status ) )
 		return( status );
-	return( contextInfoPtr->loadKeyFunction( contextInfoPtr, 
-								contextInfoPtr->ctxConv->userKey, keyLength ) );
+	return( loadKeyFunction( contextInfoPtr, contextInfoPtr->ctxConv->userKey, 
+							 keyLength ) );
 	}
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
 static int generateKeyPKCFunction( INOUT CONTEXT_INFO *contextInfoPtr )
 	{
 	const CAPABILITY_INFO *capabilityInfoPtr = contextInfoPtr->capabilityInfo;
+	const PKC_CALCULATEKEYID_FUNCTION calculateKeyIDFunction = \
+				FNPTR_GET( contextInfoPtr->ctxPKC->calculateKeyIDFunction );
 	int keyLength = bitsToBytes( contextInfoPtr->ctxPKC->keySizeBits );
 	int status;
 
 	assert( isWritePtr( contextInfoPtr, sizeof( CONTEXT_INFO ) ) );
 
 	REQUIRES( contextInfoPtr->type == CONTEXT_PKC );
+	REQUIRES( calculateKeyIDFunction != NULL );
 
 	/* Set up supplementary key information */
 	contextInfoPtr->ctxPKC->pgpCreationTime = getApproxTime();
@@ -757,19 +786,22 @@ static int generateKeyPKCFunction( INOUT CONTEXT_INFO *contextInfoPtr )
 		clearTempBignums( contextInfoPtr->ctxPKC );
 	if( cryptStatusError( status ) )
 		return( status );
-	return( contextInfoPtr->ctxPKC->calculateKeyIDFunction( contextInfoPtr ) );
+	return( calculateKeyIDFunction( contextInfoPtr ) );
 	}
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
 static int generateKeyMacFunction( INOUT CONTEXT_INFO *contextInfoPtr )
 	{
 	const CAPABILITY_INFO *capabilityInfoPtr = contextInfoPtr->capabilityInfo;
+	const CTX_LOADKEY_FUNCTION loadKeyFunction = \
+							FNPTR_GET( contextInfoPtr->loadKeyFunction );
 	MESSAGE_DATA msgData;
 	int keyLength = contextInfoPtr->ctxMAC->userKeyLength, status;
 
 	assert( isWritePtr( contextInfoPtr, sizeof( CONTEXT_INFO ) ) );
 	
 	REQUIRES( contextInfoPtr->type == CONTEXT_MAC );
+	REQUIRES( loadKeyFunction != NULL );
 
 	/* If there's no key size specified, use the default length */
 	if( keyLength <= 0 )
@@ -795,20 +827,23 @@ static int generateKeyMacFunction( INOUT CONTEXT_INFO *contextInfoPtr )
 							  &msgData, CRYPT_IATTRIBUTE_RANDOM );
 	if( cryptStatusError( status ) )
 		return( status );
-	return( contextInfoPtr->loadKeyFunction( contextInfoPtr, 
-								contextInfoPtr->ctxMAC->userKey, keyLength ) );
+	return( loadKeyFunction( contextInfoPtr, contextInfoPtr->ctxMAC->userKey, 
+							 keyLength ) );
 	}
 
 CHECK_RETVAL STDC_NONNULL_ARG( ( 1 ) ) \
 static int generateKeyGenericFunction( INOUT CONTEXT_INFO *contextInfoPtr )
 	{
 	const CAPABILITY_INFO *capabilityInfoPtr = contextInfoPtr->capabilityInfo;
+	const CTX_LOADKEY_FUNCTION loadKeyFunction = \
+							FNPTR_GET( contextInfoPtr->loadKeyFunction );
 	MESSAGE_DATA msgData;
 	int keyLength = contextInfoPtr->ctxGeneric->genericSecretLength, status;
 
 	assert( isWritePtr( contextInfoPtr, sizeof( CONTEXT_INFO ) ) );
 	
 	REQUIRES( contextInfoPtr->type == CONTEXT_GENERIC );
+	REQUIRES( loadKeyFunction != NULL );
 
 	/* If there's no key size specified, use the default length */
 	if( keyLength <= 0 )
@@ -834,8 +869,8 @@ static int generateKeyGenericFunction( INOUT CONTEXT_INFO *contextInfoPtr )
 							  &msgData, CRYPT_IATTRIBUTE_RANDOM );
 	if( cryptStatusError( status ) )
 		return( status );
-	return( contextInfoPtr->loadKeyFunction( contextInfoPtr, 
-								contextInfoPtr->ctxGeneric->genericSecret, keyLength ) );
+	return( loadKeyFunction( contextInfoPtr, contextInfoPtr->ctxGeneric->genericSecret, 
+							 keyLength ) );
 	}
 
 /****************************************************************************
@@ -851,18 +886,18 @@ int deriveKey( INOUT CONTEXT_INFO *contextInfoPtr,
 			   IN_BUFFER( keyValueLen ) const void *keyValue, 
 			   IN_LENGTH_SHORT const int keyValueLen )
 	{
-	MECHANISM_DERIVE_INFO mechanismInfo;
 	static const MAP_TABLE mapTbl[] = {
-		{ CRYPT_ALGO_MD5, CRYPT_ALGO_HMAC_MD5 },
 		{ CRYPT_ALGO_SHA1, CRYPT_ALGO_HMAC_SHA1 },
-		{ CRYPT_ALGO_RIPEMD160, CRYPT_ALGO_HMAC_RIPEMD160 },
 		{ CRYPT_ALGO_SHA2, CRYPT_ALGO_HMAC_SHA2 },
 		{ CRYPT_ERROR, CRYPT_ERROR }, { CRYPT_ERROR, CRYPT_ERROR }
 		};
+	const CTX_LOADKEY_FUNCTION loadKeyFunction = \
+						FNPTR_GET( contextInfoPtr->loadKeyFunction );
+	MECHANISM_DERIVE_INFO mechanismInfo;
 	int hmacAlgo = ( contextInfoPtr->type == CONTEXT_CONV ) ? \
 					 contextInfoPtr->ctxConv->keySetupAlgorithm : \
 					 contextInfoPtr->ctxMAC->keySetupAlgorithm;
-	int value = DUMMY_INIT, status;
+	int value DUMMY_INIT, status;
 
 	assert( isWritePtr( contextInfoPtr, sizeof( CONTEXT_INFO ) ) );
 	assert( isReadPtr( keyValue, keyValueLen ) );
@@ -871,6 +906,7 @@ int deriveKey( INOUT CONTEXT_INFO *contextInfoPtr,
 			  contextInfoPtr->type == CONTEXT_MAC );
 	REQUIRES( needsKey( contextInfoPtr ) );
 	REQUIRES( keyValueLen > 0 && keyValueLen < MAX_INTLENGTH_SHORT );
+	REQUIRES( loadKeyFunction != NULL );
 
 	/* If it's a persistent context we need to have a key label set before 
 	   we can continue */
@@ -948,7 +984,7 @@ int deriveKey( INOUT CONTEXT_INFO *contextInfoPtr,
 				return( status );
 			macInfo->saltLength = PKCS5_SALT_SIZE;
 			}
-		contextInfoPtr->ctxConv->keySetupAlgorithm = hmacAlgo;
+		macInfo->keySetupAlgorithm = hmacAlgo;
 		setMechanismDeriveInfo( &mechanismInfo, macInfo->userKey, keySize,
 								keyValue, keyValueLen, 
 								macInfo->keySetupAlgorithm, 
@@ -971,9 +1007,10 @@ int deriveKey( INOUT CONTEXT_INFO *contextInfoPtr,
 	status = krnlSendMessage( SYSTEM_OBJECT_HANDLE, IMESSAGE_DEV_DERIVE, 
 							  &mechanismInfo, MECHANISM_DERIVE_PKCS5 );
 	if( cryptStatusOK( status ) )
-		status = contextInfoPtr->loadKeyFunction( contextInfoPtr,
-												  mechanismInfo.dataOut,
-												  mechanismInfo.dataOutLength );
+		{
+		status = loadKeyFunction( contextInfoPtr, mechanismInfo.dataOut,
+								  mechanismInfo.dataOutLength );
+		}
 	if( cryptStatusOK( status ) )
 		contextInfoPtr->flags |= CONTEXT_FLAG_KEY_SET;
 	zeroise( &mechanismInfo, sizeof( MECHANISM_DERIVE_INFO ) );
@@ -996,23 +1033,23 @@ void initKeyHandling( INOUT CONTEXT_INFO *contextInfoPtr )
 	switch( contextInfoPtr->type )
 		{
 		case CONTEXT_CONV:
-			contextInfoPtr->loadKeyFunction = loadKeyConvFunction;
-			contextInfoPtr->generateKeyFunction = generateKeyConvFunction;
+			FNPTR_SET( contextInfoPtr->loadKeyFunction, loadKeyConvFunction );
+			FNPTR_SET( contextInfoPtr->generateKeyFunction, generateKeyConvFunction );
 			break;
 
 		case CONTEXT_PKC:
-			contextInfoPtr->loadKeyFunction = loadKeyPKCFunction;
-			contextInfoPtr->generateKeyFunction = generateKeyPKCFunction;
+			FNPTR_SET( contextInfoPtr->loadKeyFunction, loadKeyPKCFunction );
+			FNPTR_SET( contextInfoPtr->generateKeyFunction, generateKeyPKCFunction );
 			break;
 
 		case CONTEXT_MAC:
-			contextInfoPtr->loadKeyFunction = loadKeyMacFunction;
-			contextInfoPtr->generateKeyFunction = generateKeyMacFunction;
+			FNPTR_SET( contextInfoPtr->loadKeyFunction, loadKeyMacFunction );
+			FNPTR_SET( contextInfoPtr->generateKeyFunction, generateKeyMacFunction );
 			break;
 
 		case CONTEXT_GENERIC:
-			contextInfoPtr->loadKeyFunction = loadKeyGenericFunction;
-			contextInfoPtr->generateKeyFunction = generateKeyGenericFunction;
+			FNPTR_SET( contextInfoPtr->loadKeyFunction, loadKeyGenericFunction );
+			FNPTR_SET( contextInfoPtr->generateKeyFunction, generateKeyGenericFunction );
 			break;
 
 		default:

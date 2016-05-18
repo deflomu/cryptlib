@@ -35,7 +35,7 @@ static const MAP_TABLE clibReqReqMapTbl[] = {
 	{ CRYPT_ERROR, CRYPT_ERROR }, { CRYPT_ERROR, CRYPT_ERROR }
 	};
 
-CHECK_RETVAL_RANGE( MAX_ERROR, CTAG_PB_LAST ) \
+CHECK_RETVAL_RANGE( 0, CTAG_PB_LAST ) \
 static int clibReqToReq( IN_ENUM( CRYPT_REQUESTTYPE ) const int reqType )
 	{
 	int value, status;
@@ -418,9 +418,9 @@ static int clientTransactWrapper( INOUT SESSION_INFO *sessionInfoPtr )
 	/* We're doing plug-and-play PKI, point the transaction function at the 
 	   client-transact function while we execute the PnP steps, then reset 
 	   it back to the PnP wrapper after we're done */
-	sessionInfoPtr->transactFunction = clientTransact;
+	FNPTR_SET( sessionInfoPtr->transactFunction, clientTransact );
 	status = pnpPkiSession( sessionInfoPtr );
-	sessionInfoPtr->transactFunction = clientTransactWrapper;
+	FNPTR_SET( sessionInfoPtr->transactFunction, clientTransactWrapper );
 	return( status );
 	}
 
@@ -435,7 +435,7 @@ void initCMPclientProcessing( SESSION_INFO *sessionInfoPtr )
 	{
 	assert( isWritePtr( sessionInfoPtr, sizeof( SESSION_INFO ) ) );
 
-	sessionInfoPtr->connectFunction = clientStartup;
-	sessionInfoPtr->transactFunction = clientTransactWrapper;
+	FNPTR_SET( sessionInfoPtr->connectFunction, clientStartup );
+	FNPTR_SET( sessionInfoPtr->transactFunction, clientTransactWrapper );
 	}
 #endif /* USE_CMP */
